@@ -1,4 +1,167 @@
-# Placeholder. Generated from crates/operator/src/crds/namespace_scan.rs via
-#   cargo run --bin mikebom-operator-ctl -- crd > charts/mikebom-operator/crds/namespacescan.kusari.dev_v1.yaml
-# Feature 001 wires the emit subcommand (per plan §10). The chart's CRD schema
-# is always derived from the Rust struct, never hand-edited (constitution VII).
+apiVersion: apiextensions.k8s.io/v1
+kind: CustomResourceDefinition
+metadata:
+  name: namespacescans.kusari.dev
+spec:
+  group: kusari.dev
+  names:
+    categories: []
+    kind: NamespaceScan
+    plural: namespacescans
+    shortNames:
+    - nsscan
+    singular: namespacescan
+  scope: Namespaced
+  versions:
+  - additionalPrinterColumns: []
+    name: v1alpha1
+    schema:
+      openAPIV3Schema:
+        description: Auto-generated derived type for NamespaceScanSpec via `CustomResource`
+        properties:
+          spec:
+            properties:
+              mikebomImage:
+                description: Pinned mikebom image (e.g., `ghcr.io/kusari-oss/mikebom:v0.1.0-alpha.51`).
+                type: string
+              output:
+                properties:
+                  oci:
+                    nullable: true
+                    properties:
+                      registry:
+                        type: string
+                      repository:
+                        type: string
+                    required:
+                    - registry
+                    - repository
+                    type: object
+                  pvc:
+                    nullable: true
+                    properties:
+                      claimName:
+                        type: string
+                      pathPrefix:
+                        nullable: true
+                        type: string
+                    required:
+                    - claimName
+                    type: object
+                  s3:
+                    nullable: true
+                    properties:
+                      bucket:
+                        type: string
+                      pathPrefix:
+                        nullable: true
+                        type: string
+                      region:
+                        type: string
+                    required:
+                    - bucket
+                    - region
+                    type: object
+                  type:
+                    enum:
+                    - pvc
+                    - s3
+                    - oci
+                    type: string
+                required:
+                - type
+                type: object
+              scanFormat:
+                enum:
+                - cyclonedx-json
+                - spdx-2.3-json
+                - spdx-3-json
+                type: string
+              schedule:
+                properties:
+                  cron:
+                    nullable: true
+                    type: string
+                  interval:
+                    description: Go-style duration string (`6h`, `30m`, etc.).
+                    nullable: true
+                    type: string
+                type: object
+              target:
+                properties:
+                  kinds:
+                    description: Workload kinds. Defaults to `[Pod]` per plan §5 note.
+                    items:
+                      type: string
+                    type: array
+                  labelSelector:
+                    nullable: true
+                    type: string
+                  namespaces:
+                    items:
+                      type: string
+                    type: array
+                type: object
+            required:
+            - mikebomImage
+            - output
+            - scanFormat
+            - schedule
+            - target
+            type: object
+          status:
+            nullable: true
+            properties:
+              conditions:
+                default: []
+                items:
+                  properties:
+                    lastTransitionTime:
+                      nullable: true
+                      type: string
+                    message:
+                      nullable: true
+                      type: string
+                    reason:
+                      nullable: true
+                      type: string
+                    status:
+                      type: string
+                    type:
+                      type: string
+                  required:
+                  - status
+                  - type
+                  type: object
+                type: array
+              lastScanCompletedAt:
+                nullable: true
+                type: string
+              scannedImages:
+                default: []
+                items:
+                  properties:
+                    completedAt:
+                      type: string
+                    imageRef:
+                      type: string
+                    resolvedSha:
+                      nullable: true
+                      type: string
+                    sbomLocation:
+                      type: string
+                  required:
+                  - completedAt
+                  - imageRef
+                  - sbomLocation
+                  type: object
+                type: array
+            type: object
+        required:
+        - spec
+        title: NamespaceScan
+        type: object
+    served: true
+    storage: true
+    subresources:
+      status: {}

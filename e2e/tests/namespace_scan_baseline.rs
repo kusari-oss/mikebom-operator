@@ -9,7 +9,6 @@
 fn namespace_scan_baseline() {
     if std::env::var("MIKEBOM_OPERATOR_E2E").ok().as_deref() != Some("1") {
         eprintln!("MIKEBOM_OPERATOR_E2E unset; skipping kind-based E2E.");
-        return;
+        // Implementation lands in feature 008 (per plan §10).
     }
-    // Implementation lands in feature 008 (per plan §10).
 }
