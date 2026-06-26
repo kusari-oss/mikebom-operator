@@ -1,0 +1,19 @@
+apiVersion: kusari.dev/v1alpha1
+kind: NamespaceScan
+metadata:
+  name: scan-prod
+  namespace: kusari-operator
+spec:
+  target:
+    namespaces: [prod, prod-canary]
+    kinds: [Pod]
+  schedule:
+    cron: "0 */6 * * *"
+  mikebomImage: ghcr.io/kusari-oss/mikebom:v0.1.0-alpha.51
+  scanFormat: cyclonedx-json
+  output:
+    type: s3
+    s3:
+      bucket: sboms.example.com
+      region: us-west-2
+      pathPrefix: "{cluster}/{namespace}/{image-sha}.cdx.json"

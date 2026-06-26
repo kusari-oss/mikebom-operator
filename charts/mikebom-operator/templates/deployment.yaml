@@ -1,0 +1,46 @@
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: {{ include "mikebom-operator.fullname" . }}
+  labels:
+    {{- include "mikebom-operator.labels" . | nindent 4 }}
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      {{- include "mikebom-operator.selectorLabels" . | nindent 6 }}
+  template:
+    metadata:
+      labels:
+        {{- include "mikebom-operator.selectorLabels" . | nindent 8 }}
+    spec:
+      serviceAccountName: {{ include "mikebom-operator.serviceAccountName" . }}
+      containers:
+        - name: operator
+          image: "{{ .Values.image.repository }}:{{ .Values.image.tag }}"
+          imagePullPolicy: {{ .Values.image.pullPolicy }}
+          env:
+            - name: RUST_LOG
+              value: info
+            - name: MIKEBOM_DEFAULT_IMAGE
+              value: {{ .Values.mikebom.image | quote }}
+            - name: MIKEBOM_DEFAULT_SCAN_FORMAT
+              value: {{ .Values.defaults.scanFormat | quote }}
+            {{- if .Values.leaderElection.enabled }}
+            - name: MIKEBOM_LEADER_LEASE
+              value: {{ .Values.leaderElection.leaseName | quote }}
+            {{- end }}
+          resources:
+            {{- toYaml .Values.resources | nindent 12 }}
+      {{- with .Values.nodeSelector }}
+      nodeSelector:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
+      {{- with .Values.tolerations }}
+      tolerations:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
+      {{- with .Values.affinity }}
+      affinity:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
