@@ -3,10 +3,24 @@
 `apiVersion: kusari.dev/v1alpha1`, `kind: NamespaceScan`, namespaced.
 
 The canonical example is in plan §5 and `examples/namespacescan.yaml`.
-The fields below correspond 1:1 to `crates/operator/src/crds/namespace_scan.rs`.
+The fields below correspond 1:1 to `crates/operator/src/crds/namespace_scan.rs`,
+which is the **single source of truth** — constitution principle VII.
 
-Full field-by-field reference will be auto-generated from the Rust struct
-via `mikebom-operator-ctl crd` in feature 001 (per plan §10).
+## Regenerating the chart CRD YAML
+
+The chart's CRD manifest at `charts/mikebom-operator/crds/namespacescan.kusari.dev_v1.yaml`
+is generated from the Rust struct. After editing
+`crates/operator/src/crds/namespace_scan.rs`, regenerate:
+
+```sh
+cargo run --bin mikebom-operator-ctl -- crd \
+  --output charts/mikebom-operator/crds/namespacescan.kusari.dev_v1.yaml
+```
+
+A `cargo test --workspace` run verifies the chart YAML matches the generator
+(`crates/operator/tests/crd_drift.rs::chart_crd_yaml_matches_generator`). If
+the test fails in CI, the failure message will name this regen command
+verbatim.
 
 ## Spec — top-level fields
 

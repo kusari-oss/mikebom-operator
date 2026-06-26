@@ -1,0 +1,12 @@
+target/
+**/target/
+.git/
+.github/
+specs/
+docs/
+e2e/
+charts/
+*.tgz
+.DS_Store
+Dockerfile
+.dockerignore
