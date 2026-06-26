@@ -1,0 +1,17 @@
+[package]
+name = "e2e"
+description = "End-to-end tests for mikebom-operator (kind-based)."
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+authors.workspace = true
+publish = false
+
+[[test]]
+name = "namespace_scan_baseline"
+path = "tests/namespace_scan_baseline.rs"
+
+[dependencies]
+anyhow.workspace = true
+tokio.workspace = true

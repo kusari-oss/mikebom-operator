@@ -1,0 +1,4 @@
+# Placeholder. Generated from crates/operator/src/crds/namespace_scan.rs via
+#   cargo run --bin mikebom-operator-ctl -- crd > charts/mikebom-operator/crds/namespacescan.kusari.dev_v1.yaml
+# Feature 001 wires the emit subcommand (per plan §10). The chart's CRD schema
+# is always derived from the Rust struct, never hand-edited (constitution VII).

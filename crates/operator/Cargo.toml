@@ -1,0 +1,27 @@
+[package]
+name = "operator"
+description = "mikebom Kubernetes operator: watches namespaces and generates SBOMs for running container images via mikebom."
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+authors.workspace = true
+
+[[bin]]
+name = "mikebom-operator"
+path = "src/main.rs"
+
+[dependencies]
+kube.workspace = true
+k8s-openapi.workspace = true
+tokio.workspace = true
+serde.workspace = true
+serde_json.workspace = true
+tracing.workspace = true
+tracing-subscriber.workspace = true
+anyhow.workspace = true
+thiserror.workspace = true
+schemars.workspace = true
+chrono.workspace = true
+futures.workspace = true
+async-trait.workspace = true
