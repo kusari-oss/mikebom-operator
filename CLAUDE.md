@@ -1,4 +1,3 @@
 <!-- SPECKIT START -->
-For additional context about technologies to be used, project structure,
-shell commands, and other important information, read the current plan
+Active plan: [specs/001-crd-yaml-generator/plan.md](specs/001-crd-yaml-generator/plan.md)
 <!-- SPECKIT END -->

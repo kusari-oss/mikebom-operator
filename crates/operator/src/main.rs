@@ -1,8 +1,3 @@
-mod crds;
-mod output;
-mod reconcile;
-mod status;
-
 use anyhow::Result;
 use tracing_subscriber::EnvFilter;
 

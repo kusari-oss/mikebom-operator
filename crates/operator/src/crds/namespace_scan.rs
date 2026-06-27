@@ -49,10 +49,12 @@ pub struct Schedule {
 }
 
 #[derive(Deserialize, Serialize, Clone, Debug, JsonSchema)]
-#[serde(rename_all = "kebab-case")]
 pub enum ScanFormat {
+    #[serde(rename = "cyclonedx-json")]
     CyclonedxJson,
+    #[serde(rename = "spdx-2.3-json")]
     Spdx23Json,
+    #[serde(rename = "spdx-3-json")]
     Spdx3Json,
 }
 
