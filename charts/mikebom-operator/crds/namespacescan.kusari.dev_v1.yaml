@@ -53,6 +53,10 @@ spec:
                     properties:
                       bucket:
                         type: string
+                      credentialsSecretName:
+                        description: 'Name of a Kubernetes Secret in the operator''s namespace that holds AWS credentials. The Secret MUST contain at minimum the keys `AWS_ACCESS_KEY_ID` and `AWS_SECRET_ACCESS_KEY`. The output-upload container reads them via `envFrom: { secretRef }`.'
+                        nullable: true
+                        type: string
                       pathPrefix:
                         nullable: true
                         type: string

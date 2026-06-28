@@ -94,6 +94,12 @@ pub struct S3Output {
     pub region: String,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub path_prefix: Option<String>,
+    /// Name of a Kubernetes Secret in the operator's namespace that holds AWS
+    /// credentials. The Secret MUST contain at minimum the keys
+    /// `AWS_ACCESS_KEY_ID` and `AWS_SECRET_ACCESS_KEY`. The output-upload
+    /// container reads them via `envFrom: { secretRef }`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub credentials_secret_name: Option<String>,
 }
 
 #[derive(Deserialize, Serialize, Clone, Debug, JsonSchema)]

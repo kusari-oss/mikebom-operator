@@ -13,15 +13,17 @@ use std::collections::BTreeMap;
 
 use k8s_openapi::api::batch::v1::{Job, JobSpec};
 use k8s_openapi::api::core::v1::{
-    Container, EmptyDirVolumeSource, EnvVar, PersistentVolumeClaimVolumeSource, PodSpec,
-    PodTemplateSpec, ResourceRequirements, Volume, VolumeMount,
+    Container, EmptyDirVolumeSource, EnvFromSource, EnvVar, PersistentVolumeClaimVolumeSource,
+    PodSpec, PodTemplateSpec, ResourceRequirements, SecretEnvSource, Volume, VolumeMount,
 };
 use k8s_openapi::apimachinery::pkg::api::resource::Quantity;
 use k8s_openapi::apimachinery::pkg::apis::meta::v1::ObjectMeta;
 use sha2::{Digest, Sha256};
 use thiserror::Error;
 
-use crate::crds::namespace_scan::{NamespaceScanSpec, Output, OutputType, PvcOutput, ScanFormat};
+use crate::crds::namespace_scan::{
+    NamespaceScanSpec, Output, OutputType, PvcOutput, S3Output, ScanFormat,
+};
 
 /// Hardcoded defaults for the v0.3 builder. Pinned to manifest digests per
 /// feature 001's constitution-VII pinning convention.
@@ -39,11 +41,20 @@ pub mod defaults {
         "gcr.io/go-containerregistry/crane@sha256:1b1fb24d2b1bb27a9daf81a588157e68463876904e8e537a812edba6284fb252";
     // crane:debug latest as of 2026-06-28
 
-    /// Output-upload v0.3 placeholder: Chainguard's free-tier distroless busybox.
-    /// Replaced by features 004/005/006 with concrete PVC / S3 / OCI backend wiring.
+    /// Output-upload placeholder: Chainguard's free-tier distroless busybox.
+    /// Used for the v0.3 dispatch arm (OCI in v0.5 + earlier; feature 006 replaces).
     pub const OUTPUT_UPLOAD_IMAGE: &str =
         "cgr.dev/chainguard/busybox@sha256:accc5c911abaf2f70487f93cad07b0891d502cbba7e79f96d1db9074ef40928a";
     // latest as of 2026-06-28
+
+    /// S3 upload image — AWS-maintained official AWS CLI image (feature 005).
+    /// Publicly accessible via Amazon ECR. Ships `aws` + a POSIX `sh` so we can
+    /// override the default `aws` entrypoint with `sh -c "..."` for our script.
+    ///
+    /// Refresh via `crane digest public.ecr.aws/aws-cli/aws-cli:latest`.
+    pub const S3_UPLOAD_IMAGE: &str =
+        "public.ecr.aws/aws-cli/aws-cli@sha256:749bfaf91d690b9a1768083822d620f96c19defdf9ca2dc227eb3695281fda5b";
+    // aws-cli:latest as of 2026-06-28
 
     pub const TTL_SECONDS_AFTER_FINISHED: i32 = 3600;
     pub const BACKOFF_LIMIT: i32 = 2;
@@ -70,6 +81,9 @@ pub enum BuildScanJobError {
 
     #[error("spec.output.type=Pvc requires spec.output.pvc.claimName to be non-empty")]
     MissingPvcConfig,
+
+    #[error("spec.output.type=S3 requires spec.output.s3 with non-empty bucket and credentialsSecretName")]
+    MissingS3Config,
 }
 
 /// Build a 3-container scan Job for the given `NamespaceScan` CR and target image ref.
@@ -352,6 +366,66 @@ fn build_output_upload_pvc_container(pvc: &PvcOutput) -> Container {
     }
 }
 
+/// S3-variant `output-upload` container — copies SBOMs to an S3 bucket via
+/// `aws s3 cp`. AWS credentials are sourced from a user-supplied Secret via
+/// `envFrom: { secretRef }`; region and bucket are literal env vars from the
+/// spec.
+fn build_output_upload_s3_container(s3: &S3Output) -> Container {
+    let path_prefix = s3
+        .path_prefix
+        .as_deref()
+        .map(strip_leading_slash)
+        .unwrap_or("");
+    // Mirrors the PVC arm's POSIX `${X:+/${X}}` trick for clean empty-prefix
+    // handling. `--recursive --include` keeps the upload scoped to SBOM JSON.
+    let script = "set -eu\n\
+        DEST=\"s3://$S3_BUCKET${S3_PATH_PREFIX:+/${S3_PATH_PREFIX}}\"\n\
+        aws s3 cp /workdir/out/ \"$DEST/\" --recursive --exclude '*' --include '*.json'";
+
+    let credentials_secret = s3
+        .credentials_secret_name
+        .as_deref()
+        .expect("validated upstream by dispatch")
+        .to_string();
+
+    Container {
+        name: "output-upload".to_string(),
+        image: Some(defaults::S3_UPLOAD_IMAGE.to_string()),
+        command: Some(vec!["sh".to_string(), "-c".to_string(), script.to_string()]),
+        env: Some(vec![
+            EnvVar {
+                name: "S3_BUCKET".to_string(),
+                value: Some(s3.bucket.clone()),
+                ..Default::default()
+            },
+            EnvVar {
+                name: "S3_PATH_PREFIX".to_string(),
+                value: Some(path_prefix.to_string()),
+                ..Default::default()
+            },
+            EnvVar {
+                name: "AWS_REGION".to_string(),
+                value: Some(s3.region.clone()),
+                ..Default::default()
+            },
+            EnvVar {
+                name: "AWS_DEFAULT_REGION".to_string(),
+                value: Some(s3.region.clone()),
+                ..Default::default()
+            },
+        ]),
+        env_from: Some(vec![EnvFromSource {
+            secret_ref: Some(SecretEnvSource {
+                name: credentials_secret,
+                optional: Some(false),
+            }),
+            ..Default::default()
+        }]),
+        volume_mounts: Some(vec![workdir_mount()]),
+        ..Default::default()
+    }
+}
+
 /// Dispatch on `output.type` to produce the appropriate `output-upload` container.
 /// See `specs/004-pvc-backend/contracts/output-backends.md` for the contract.
 fn build_output_upload_container(output: &Output) -> Result<Container, BuildScanJobError> {
@@ -366,7 +440,23 @@ fn build_output_upload_container(output: &Output) -> Result<Container, BuildScan
             }
             Ok(build_output_upload_pvc_container(pvc))
         }
-        OutputType::S3 | OutputType::Oci => Ok(build_output_upload_placeholder_container()),
+        OutputType::S3 => {
+            let s3 = output
+                .s3
+                .as_ref()
+                .ok_or(BuildScanJobError::MissingS3Config)?;
+            if s3.bucket.trim().is_empty()
+                || s3
+                    .credentials_secret_name
+                    .as_deref()
+                    .map(|s| s.trim().is_empty())
+                    .unwrap_or(true)
+            {
+                return Err(BuildScanJobError::MissingS3Config);
+            }
+            Ok(build_output_upload_s3_container(s3))
+        }
+        OutputType::Oci => Ok(build_output_upload_placeholder_container()),
     }
 }
 
@@ -397,11 +487,13 @@ mod tests {
             },
             mikebom_image: "ghcr.io/kusari-oss/mikebom:v0.1.0-alpha.51".to_string(),
             scan_format: ScanFormat::CyclonedxJson,
-            // Feature 004 dispatch: use OutputType::S3 so the inherited tests
-            // exercise the placeholder branch (Pvc with `pvc: None` would now
-            // return MissingPvcConfig). Feature 005 will tighten when it lands.
+            // Feature 005 dispatch: use OutputType::Oci so the inherited tests
+            // exercise the remaining placeholder branch. (Previous backends
+            // require validated config now: Pvc → MissingPvcConfig if
+            // pvc=None, S3 → MissingS3Config if s3=None.) Feature 006 will
+            // need to migrate this again when it lands.
             output: Output {
-                backend_type: OutputType::S3,
+                backend_type: OutputType::Oci,
                 pvc: None,
                 s3: None,
                 oci: None,
@@ -579,7 +671,7 @@ mod tests {
     }
 
     #[test]
-    fn output_upload_non_pvc_is_v03_placeholder() {
+    fn output_upload_oci_is_v03_placeholder() {
         let job = build_scan_job(&valid_spec(), "scan-prod", "nginx:1.27.0").unwrap();
         let upload = &pod_spec(&job).containers[0];
         assert_eq!(upload.image.as_deref(), Some(defaults::OUTPUT_UPLOAD_IMAGE));
@@ -820,5 +912,146 @@ mod tests {
         let err2 =
             build_scan_job(&valid_pvc_spec("   ", None), "scan-prod", "nginx:1.27.0").unwrap_err();
         assert_eq!(err2, BuildScanJobError::MissingPvcConfig);
+    }
+
+    // ---------- Feature 005 — S3 output backend ----------
+
+    fn valid_s3_spec(
+        bucket: &str,
+        region: &str,
+        credentials_secret_name: Option<&str>,
+        path_prefix: Option<&str>,
+    ) -> NamespaceScanSpec {
+        let mut spec = valid_spec();
+        spec.output = Output {
+            backend_type: OutputType::S3,
+            pvc: None,
+            s3: Some(S3Output {
+                bucket: bucket.to_string(),
+                region: region.to_string(),
+                path_prefix: path_prefix.map(|s| s.to_string()),
+                credentials_secret_name: credentials_secret_name.map(|s| s.to_string()),
+            }),
+            oci: None,
+        };
+        spec
+    }
+
+    #[test]
+    fn s3_dispatch_uses_aws_cli_image() {
+        let spec = valid_s3_spec("sboms-prod", "us-west-2", Some("aws-creds"), None);
+        let job = build_scan_job(&spec, "scan-prod", "nginx:1.27.0").unwrap();
+        let upload = &pod_spec(&job).containers[0];
+        assert_eq!(upload.image.as_deref(), Some(defaults::S3_UPLOAD_IMAGE));
+    }
+
+    #[test]
+    fn s3_output_upload_uses_aws_s3_cp() {
+        let spec = valid_s3_spec("sboms-prod", "us-west-2", Some("aws-creds"), None);
+        let job = build_scan_job(&spec, "scan-prod", "nginx:1.27.0").unwrap();
+        let upload = &pod_spec(&job).containers[0];
+        let cmd = upload.command.as_ref().unwrap().join("\n");
+        assert!(
+            cmd.contains("aws s3 cp /workdir/out/"),
+            "missing aws s3 cp: {cmd}",
+        );
+        assert!(cmd.contains("S3_BUCKET"), "missing S3_BUCKET ref: {cmd}");
+        assert!(
+            cmd.contains("--include '*.json'"),
+            "missing json-only filter: {cmd}",
+        );
+    }
+
+    #[test]
+    fn s3_env_carries_bucket_and_region() {
+        let spec = valid_s3_spec("sboms-prod", "us-west-2", Some("aws-creds"), None);
+        let job = build_scan_job(&spec, "scan-prod", "nginx:1.27.0").unwrap();
+        let upload = &pod_spec(&job).containers[0];
+        let env = upload.env.as_ref().unwrap();
+        assert!(env
+            .iter()
+            .any(|e| e.name == "S3_BUCKET" && e.value.as_deref() == Some("sboms-prod")));
+        assert!(env
+            .iter()
+            .any(|e| e.name == "AWS_REGION" && e.value.as_deref() == Some("us-west-2")));
+        assert!(env
+            .iter()
+            .any(|e| e.name == "AWS_DEFAULT_REGION" && e.value.as_deref() == Some("us-west-2")));
+    }
+
+    #[test]
+    fn s3_credentials_come_from_secret_via_envfrom() {
+        let spec = valid_s3_spec("sboms-prod", "us-west-2", Some("aws-creds"), None);
+        let job = build_scan_job(&spec, "scan-prod", "nginx:1.27.0").unwrap();
+        let upload = &pod_spec(&job).containers[0];
+        let env_from = upload
+            .env_from
+            .as_ref()
+            .expect("env_from must be set for S3");
+        assert!(
+            env_from.iter().any(|e| e
+                .secret_ref
+                .as_ref()
+                .is_some_and(|sr| sr.name == "aws-creds")),
+            "envFrom should reference secret 'aws-creds'; got {env_from:?}",
+        );
+    }
+
+    #[test]
+    fn s3_output_upload_respects_path_prefix() {
+        let spec = valid_s3_spec("sboms-prod", "us-west-2", Some("aws-creds"), Some("team-a"));
+        let job = build_scan_job(&spec, "scan-prod", "nginx:1.27.0").unwrap();
+        let upload = &pod_spec(&job).containers[0];
+        let env = upload.env.as_ref().unwrap();
+        assert!(env
+            .iter()
+            .any(|e| e.name == "S3_PATH_PREFIX" && e.value.as_deref() == Some("team-a")));
+    }
+
+    #[test]
+    fn s3_path_prefix_strips_leading_slash() {
+        let spec = valid_s3_spec(
+            "sboms-prod",
+            "us-west-2",
+            Some("aws-creds"),
+            Some("/team-a"),
+        );
+        let job = build_scan_job(&spec, "scan-prod", "nginx:1.27.0").unwrap();
+        let upload = &pod_spec(&job).containers[0];
+        let env = upload.env.as_ref().unwrap();
+        assert!(env
+            .iter()
+            .any(|e| e.name == "S3_PATH_PREFIX" && e.value.as_deref() == Some("team-a")));
+    }
+
+    #[test]
+    fn missing_s3_config_errors_when_s3_none() {
+        let mut spec = valid_spec();
+        spec.output.backend_type = OutputType::S3;
+        spec.output.s3 = None;
+        let err = build_scan_job(&spec, "scan-prod", "nginx:1.27.0").unwrap_err();
+        assert_eq!(err, BuildScanJobError::MissingS3Config);
+    }
+
+    #[test]
+    fn missing_s3_config_errors_when_bucket_or_secret_empty() {
+        // Empty bucket → error
+        let s = valid_s3_spec("", "us-west-2", Some("aws-creds"), None);
+        assert_eq!(
+            build_scan_job(&s, "scan-prod", "nginx:1.27.0").unwrap_err(),
+            BuildScanJobError::MissingS3Config,
+        );
+        // Missing credentials secret → error
+        let s = valid_s3_spec("sboms-prod", "us-west-2", None, None);
+        assert_eq!(
+            build_scan_job(&s, "scan-prod", "nginx:1.27.0").unwrap_err(),
+            BuildScanJobError::MissingS3Config,
+        );
+        // Whitespace credentials secret → error
+        let s = valid_s3_spec("sboms-prod", "us-west-2", Some("   "), None);
+        assert_eq!(
+            build_scan_job(&s, "scan-prod", "nginx:1.27.0").unwrap_err(),
+            BuildScanJobError::MissingS3Config,
+        );
     }
 }

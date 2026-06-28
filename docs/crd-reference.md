@@ -119,9 +119,52 @@ Access-mode guidance:
 | `ReadWriteOnce` (RWO) | Single-node cluster, or one scan at a time per NamespaceScan |
 | `ReadWriteMany` (RWX) | Multi-node cluster running concurrent scans (NFS, CephFS, EFS, etc.) |
 
-### S3 and OCI
+### S3
 
-Wire-up lands in features 005 (S3) and 006 (OCI). Until then, setting
-`output.type: s3` or `oci` makes the operator's `output-upload` container ship
-the v0.3 debug placeholder (a `ls && cat` of `/workdir/out/`) — useful for
-seeing what `mikebom-scan` would have produced without actually persisting it.
+Uploads SBOMs to an Amazon S3 bucket via the `aws s3 cp` command running in the
+`output-upload` container. Credentials come from a user-supplied Kubernetes
+Secret in the operator's namespace.
+
+```yaml
+apiVersion: kusari.dev/v1alpha1
+kind: NamespaceScan
+metadata:
+  name: scan-prod
+spec:
+  target:
+    namespaces: [prod]
+  schedule:
+    cron: "0 */6 * * *"
+  mikebomImage: ghcr.io/kusari-oss/mikebom:v0.1.0-alpha.51
+  scanFormat: cyclonedx-json
+  output:
+    type: s3
+    s3:
+      bucket: sboms-prod
+      region: us-west-2
+      credentialsSecretName: aws-creds   # required; Secret in operator namespace
+      pathPrefix: "team-a"               # optional; literal key prefix under the bucket
+```
+
+The referenced Secret must contain at least:
+
+```sh
+kubectl create secret generic aws-creds -n kusari-operator \
+  --from-literal=AWS_ACCESS_KEY_ID=AKIA… \
+  --from-literal=AWS_SECRET_ACCESS_KEY=…
+```
+
+The `output-upload` container reads them via `envFrom: { secretRef }`; region
+and bucket are populated from the CR as literal env vars (`AWS_REGION`,
+`AWS_DEFAULT_REGION`, `S3_BUCKET`, `S3_PATH_PREFIX`).
+
+The destination object key for each SBOM is
+`s3://<bucket>/<pathPrefix>/<image-hash>.<format-extension>` (or
+`s3://<bucket>/<image-hash>.<format-extension>` when `pathPrefix` is unset).
+
+### OCI
+
+Wire-up lands in feature 006. Until then, setting `output.type: oci` makes the
+operator's `output-upload` container ship the v0.3 debug placeholder (a
+`ls && cat` of `/workdir/out/`) — useful for seeing what `mikebom-scan` would
+have produced without actually persisting it.

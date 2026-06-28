@@ -35,6 +35,11 @@ jobs:
         with:
           fetch-depth: 0
       - uses: azure/setup-helm@1a275c3b69536ee54be43f2070a358922e12c8d4 # v4
-      - uses: helm/chart-testing-action@6ec842c01de15ebb84c8627d2744a0c2f2755c9f # v2
+      # Pinned to the commit BEFORE helm/chart-testing-action#184 bumped
+      # sigstore/cosign-installer 3.8.1 → 4.0.0. The 4.0.0 bump causes
+      # Rekor signature verification to fail with `ecdsa: Invalid IEEE_P1363
+      # encoded bytes` when the action installs the `ct` binary. Bump back
+      # to the v2 head once upstream resolves the issue.
+      - uses: helm/chart-testing-action@4ea74f62c9503ceaffb14a189bf252e7c68e87a3 # v2 (pre-cosign-4.0.0)
       - name: ct lint
         run: ct lint --charts charts/mikebom-operator --validate-maintainers=false
