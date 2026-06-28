@@ -393,6 +393,8 @@ name = "e2e"
 version = "0.1.0"
 dependencies = [
  "anyhow",
+ "operator",
+ "serde_yaml",
  "tokio",
 ]
 
@@ -1145,10 +1147,12 @@ dependencies = [
  "k8s-openapi",
  "kube",
  "pretty_assertions",
+ "regex",
  "schemars",
  "serde",
  "serde_json",
  "serde_yaml",
+ "sha2",
  "thiserror 2.0.18",
  "tokio",
  "tracing",

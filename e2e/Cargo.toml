@@ -15,3 +15,5 @@ path = "tests/namespace_scan_baseline.rs"
 [dependencies]
 anyhow.workspace = true
 tokio.workspace = true
+operator = { path = "../crates/operator" }
+serde_yaml.workspace = true

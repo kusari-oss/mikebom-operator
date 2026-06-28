@@ -98,6 +98,18 @@ Reconciling an unchanged spec produces an identical condition (only
 This is enforced by unit tests in `crates/operator/src/status.rs` that run on
 every `cargo test --workspace`.
 
+### Scan-Job builder
+
+`operator::scan_job::build_scan_job(spec, cr_name, image_ref) -> Result<Job, _>`
+is the canonical Job-spec entry point. It produces a 3-container `batch/v1.Job`
+(`initContainers=[init-pull, mikebom-scan]`, `containers=[output-upload]`)
+sharing an `emptyDir` workdir. Feature 002's reconciler skeleton does NOT yet
+call this — feature 004+ wires it in. The function is a pure data transform;
+unit tests in `crates/operator/src/scan_job/mod.rs` cover every FR from
+`specs/003-scan-job-builder/spec.md`, and `e2e/tests/scan_job_dryrun.rs`
+validates the produced manifest against a real Kubernetes API server via
+`kubectl apply --dry-run=server` (constitution principle VI).
+
 ## Security model
 
 - The operator runs with a tightly-scoped `ClusterRole`: read pods,

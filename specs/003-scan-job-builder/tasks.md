@@ -25,9 +25,11 @@ description: "Task list for feature 003-scan-job-builder"
 
 **Purpose**: Cargo workspace dep, operator crate dep, base-image digest resolution.
 
-- [ ] T001 [P] Add `sha2 = "0.10"` to `[workspace.dependencies]` in workspace `Cargo.toml`
-- [ ] T002 [P] Add `sha2.workspace = true` to `[dependencies]` in `crates/operator/Cargo.toml`
-- [ ] T003 Resolve manifest-list digests for the two base images via `crane digest cgr.dev/chainguard/skopeo:latest` and `crane digest cgr.dev/chainguard/busybox:latest` (matches feature 001's digest-pinning convention). Record both digests + the resolution date for the inline `# latest as of YYYY-MM-DD` comment.
+- [x] T001 [P] Added `sha2 = "0.10"` to workspace `[workspace.dependencies]`
+- [x] T002 [P] Added `sha2.workspace = true` to `crates/operator/Cargo.toml`; also added `regex = "1"` to `[dev-dependencies]` for the DNS-1123 test
+- [x] T003 Resolved digests as of 2026-06-28. **Plan deviation**: research §R1 picked `cgr.dev/chainguard/skopeo:latest`, but Chainguard moved `:latest` to the paid Chainguard Direct subscription. Switched both containers to publicly-accessible distroless images (user-confirmed: "OK with Chainguard images or really any distroless image"):
+  - **init-pull** = `gcr.io/go-containerregistry/crane@sha256:1b1fb24d2b1bb27a9daf81a588157e68463876904e8e537a812edba6284fb252` (Google's go-containerregistry `crane:debug` — distroless-with-busybox; ships `sh + tar + crane`). `crane export` walks layer composition AND handles whiteout semantics correctly, replacing the skopeo + manual layer-iteration approach from research §R3 with a single pipeline.
+  - **output-upload** = `cgr.dev/chainguard/busybox@sha256:accc5c911abaf2f70487f93cad07b0891d502cbba7e79f96d1db9074ef40928a` (Chainguard free tier — unchanged from initial resolution).
 
 ---
 
@@ -37,15 +39,15 @@ description: "Task list for feature 003-scan-job-builder"
 
 **⚠️ CRITICAL**: No user-story phase can start until this phase is complete.
 
-- [ ] T004 Create `crates/operator/src/scan_job/mod.rs` with the module skeleton: `pub use` statements, `defaults` submodule containing `INIT_PULL_IMAGE`, `OUTPUT_UPLOAD_IMAGE` (digest values from T003), `TTL_SECONDS_AFTER_FINISHED = 3600`, `BACKOFF_LIMIT = 2`, `SCAN_CPU_REQUEST = "100m"`, `SCAN_MEMORY_REQUEST = "128Mi"` constants
-- [ ] T005 Add `pub mod scan_job;` to `crates/operator/src/lib.rs` so `operator::scan_job::build_scan_job` is the public path
-- [ ] T006 In `crates/operator/src/scan_job/mod.rs`, implement `pub enum BuildScanJobError` with `EmptyMikebomImage` and `EmptyImageRef` variants via `thiserror::Error` per research §R8
-- [ ] T007 Implement `fn job_name(cr_name: &str, image_ref: &str) -> String` helper: SHA-256 of `image_ref`, take first 7 hex chars, sanitize `cr_name` to DNS-1123, format as `nsscan-<sanitized>-<hash>`, truncate the sanitized portion if total length would exceed 63 chars (research §R5)
-- [ ] T008 Implement `fn build_init_pull_container(image_ref: &str) -> Container` helper: image = `defaults::INIT_PULL_IMAGE`, env carries `IMAGE_REF`, args = `["sh", "-c", "skopeo copy ... && tar -x ..."]` per research §R3, volumeMount on `workdir` at `/workdir`
-- [ ] T009 Implement `fn build_mikebom_scan_container(spec: &NamespaceScanSpec, short_hash: &str) -> Container` helper: image = `spec.mikebom_image`, args invoke `mikebom sbom scan --path /workdir/rootfs --format <format> --output <format>=/workdir/out/<short_hash>.<ext>` where `<format>` maps from `spec.scan_format` (CyclonedxJson → `cyclonedx-json` + `.cdx.json`; Spdx23Json → `spdx-2.3-json` + `.spdx.json`; Spdx3Json → `spdx-3-json` + `.spdx3.json`), `resources.requests` populated with `defaults::SCAN_CPU_REQUEST` / `SCAN_MEMORY_REQUEST`, volumeMount on `workdir`
-- [ ] T010 Implement `fn build_output_upload_container() -> Container` helper: image = `defaults::OUTPUT_UPLOAD_IMAGE`, args = `["sh", "-c", "ls -la /workdir/out/ && cat /workdir/out/*.json"]`, volumeMount on `workdir`
-- [ ] T011 Implement the public `pub fn build_scan_job(spec: &NamespaceScanSpec, cr_name: &str, image_ref: &str) -> Result<batch::v1::Job, BuildScanJobError>` tying it all together: validate inputs (empty checks → return `Err`), compute name + short hash, populate `Job::default()`'s metadata.name + labels (per data-model §2), `Job::spec` with `completions=1`, `parallelism=1`, `backoff_limit=2`, `ttl_seconds_after_finished=3600`, `template.spec` with `restart_policy="Never"`, `volumes=[workdir emptyDir]`, `init_containers=[init-pull, mikebom-scan]`, `containers=[output-upload]`
-- [ ] T012 Run `cargo fmt --all && cargo clippy --workspace --all-targets -- -D warnings && cargo check --workspace` and resolve before moving on
+- [x] T004 Created `crates/operator/src/scan_job/mod.rs` with `defaults` submodule (digest-pinned image constants, ttl/backoff/resource constants)
+- [x] T005 Added `pub mod scan_job;` to `crates/operator/src/lib.rs`
+- [x] T006 Implemented `BuildScanJobError` enum with `#[non_exhaustive]` per research §R8 (added `PartialEq, Eq` for use in test assertions)
+- [x] T007 Implemented `job_name` + helpers `short_image_hash` (7-char SHA-256 prefix) and `sanitize_dns1123` (lowercase, hyphen-fold, collapse runs, trim). 63-char cap via `max_sanitized_len = 48`
+- [x] T008 Implemented `build_init_pull_container` — uses `command` field for the `sh -c` script; `IMAGE_REF` env populated from caller; single-pipeline `crane export "$IMAGE_REF" - | tar -x -C /workdir/rootfs` (crane handles layer composition + whiteouts; replaces the per-layer iteration from research §R3)
+- [x] T009 Implemented `build_mikebom_scan_container` + `scan_format_args` helper mapping all 3 `ScanFormat` variants to `(format-arg, extension)`. Resource requests populated from `defaults::SCAN_CPU_REQUEST` / `SCAN_MEMORY_REQUEST`
+- [x] T010 Implemented `build_output_upload_container` — busybox image + `sh -c "ls -la /workdir/out/ && cat /workdir/out/*.json"` per clarify Q1 → C
+- [x] T011 Implemented public `build_scan_job` tying it all together. Labels include `app.kubernetes.io/name`, `app.kubernetes.io/component=scan-job`, `kusari.dev/namespace-scan`, `kusari.dev/image-ref-hash`. Pod template labels mirror the Job's
+- [x] T012 `cargo fmt && cargo clippy -D warnings && cargo check --workspace` all green
 
 **Checkpoint**: Builder function compiles and clippy is clean; tests come in the next three phases.
 
@@ -59,12 +61,7 @@ description: "Task list for feature 003-scan-job-builder"
 
 ### Implementation for User Story 1
 
-- [ ] T013 [US1] Add `#[cfg(test)] mod tests` to `crates/operator/src/scan_job/mod.rs` with helpers (`valid_spec()`, etc.) and unit tests covering FR-001, FR-009, FR-012:
-  - `name_is_dns1123_compliant` — regex assertion that name matches `^[a-z0-9]([-a-z0-9]*[a-z0-9])?$` and `name.len() <= 63`
-  - `name_is_deterministic` — two calls with identical `(cr_name, image_ref)` produce the same name
-  - `name_differs_for_different_images` — calls varying `image_ref` produce distinct names
-  - `empty_mikebom_image_errors` — `spec.mikebom_image = ""` returns `Err(BuildScanJobError::EmptyMikebomImage)`
-  - `empty_image_ref_errors` — `image_ref = ""` returns `Err(BuildScanJobError::EmptyImageRef)`
+- [x] T013 [US1] Authored 6 US1 tests (added `name_truncates_long_cr_name` bonus assertion). All pass. FR-001, FR-009, FR-012 covered.
 
 **Checkpoint**: Builder is provably correct for naming + input-validation invariants.
 
@@ -78,14 +75,7 @@ description: "Task list for feature 003-scan-job-builder"
 
 ### Implementation for User Story 2
 
-- [ ] T014 [US2] Extend `#[cfg(test)] mod tests` with assertions covering FR-002, FR-003, FR-004, FR-005, FR-006, FR-011:
-  - `pod_template_has_three_containers_in_correct_order` — `init_containers[0].name == "init-pull"`, `init_containers[1].name == "mikebom-scan"`, `containers[0].name == "output-upload"`
-  - `all_containers_share_workdir_emptydir` — single `Volume { name: "workdir", emptyDir: Some(_), .. }` in pod spec; all three container slots mount it at `/workdir`
-  - `init_pull_extracts_rootfs` — `init-pull.image == defaults::INIT_PULL_IMAGE`; args contain `"skopeo copy"`; env contains `IMAGE_REF`
-  - `mikebom_scan_uses_spec_image_and_args` — `mikebom-scan.image == spec.mikebom_image`; args include `["sbom", "scan", "--path", "/workdir/rootfs"]`
-  - `mikebom_scan_format_branches` — parameterized over the three `ScanFormat` variants; asserts `--format cyclonedx-json` ↔ `.cdx.json`, `--format spdx-2.3-json` ↔ `.spdx.json`, `--format spdx-3-json` ↔ `.spdx3.json`
-  - `output_upload_is_v03_placeholder` — `output-upload.image == defaults::OUTPUT_UPLOAD_IMAGE`; args contain `"ls -la /workdir/out/"` and `"cat /workdir/out/*.json"`
-  - `all_container_images_are_pinned` — for each of init-pull, mikebom-scan, output-upload: image string contains `"@sha256:"` OR a tag suffix other than `:latest`
+- [x] T014 [US2] Authored 7 US2 tests covering FR-002 / FR-003 / FR-004 / FR-005 / FR-006 / FR-011. All pass. `mikebom_scan_format_branches` parameterized over all 3 ScanFormat variants.
 
 **Checkpoint**: 3-container choreography is locked in and reviewable.
 
@@ -99,10 +89,7 @@ description: "Task list for feature 003-scan-job-builder"
 
 ### Implementation for User Story 3
 
-- [ ] T015 [US3] Extend `#[cfg(test)] mod tests` with assertions covering FR-007, FR-008, FR-010:
-  - `job_lifecycle_policies_are_one_shot` — `spec.completions == Some(1)`, `spec.parallelism == Some(1)`, `spec.backoff_limit <= Some(3)`, `template.spec.restart_policy == Some("Never".to_string())`
-  - `ttl_within_one_hour` — `spec.ttl_seconds_after_finished` is `Some(v)` with `0 < v <= 3600`
-  - `mikebom_scan_has_resource_requests` — `mikebom-scan.resources.as_ref().and_then(|r| r.requests.as_ref()).map(|r| !r.is_empty()) == Some(true)`; both `cpu` and `memory` keys present
+- [x] T015 [US3] Authored 3 US3 tests covering FR-007 / FR-008 / FR-010. All pass.
 
 **Checkpoint**: Builder satisfies the operational-safety contract.
 
@@ -112,10 +99,10 @@ description: "Task list for feature 003-scan-job-builder"
 
 **Purpose**: kind dry-run E2E (satisfies VI), docs touch, pre-PR gate, NEEDS CLARIFICATION grep.
 
-- [ ] T016 [P] [US1] Create `e2e/tests/scan_job_dryrun.rs` (gated by `MIKEBOM_OPERATOR_E2E=1`) with `scan_job_passes_server_dry_run` test: constructs fixture `NamespaceScanSpec`, calls `build_scan_job(&spec, "scan-prod", "nginx:1.27.0")?`, serializes to YAML via `serde_yaml::to_string`, pipes through `kubectl apply --dry-run=server -f - --kube-context kind-mikebom-operator-e2e -n default`, asserts success. Includes sub-tests for `ScanFormat::Spdx3Json` and for the empty-image error path. Per research §R7. Can be drafted in parallel with T013-T015 once Phase 2 lands; labeled US1 because manifest validity is the P1 story.
-- [ ] T017 [P] Add a sentence to `docs/architecture.md`'s Reconciler subsection pointing at the new `operator::scan_job::build_scan_job` function as the canonical Job-spec entry point that feature 004+ will call
-- [ ] T018 Run the per-PR gate: `cargo fmt --all -- --check && cargo clippy --workspace --all-targets -- -D warnings && cargo test --workspace && helm lint charts/mikebom-operator/` (helm lint runs in CI if not on local PATH)
-- [ ] T019 Grep `NEEDS CLARIFICATION` across `specs/003-scan-job-builder/`, `crates/operator/src/scan_job/`, `e2e/tests/`, and `docs/` to confirm zero leftover markers
+- [x] T016 [P] [US1] Created `e2e/tests/scan_job_dryrun.rs::scan_job_passes_server_dry_run` (gated) — loops over all 3 ScanFormat variants. Also `empty_mikebom_image_returns_error_path` runs ungated (pure Rust). Added `operator = { path = "../crates/operator" }` and `serde_yaml.workspace = true` to `e2e/Cargo.toml`.
+- [x] T017 [P] Added "Scan-Job builder" subsection to `docs/architecture.md`'s Reconciler block, pointing at `operator::scan_job::build_scan_job` + the test surface
+- [x] T018 Pre-PR gate: `cargo fmt` (applied), `cargo clippy -D warnings` (clean), `cargo test --workspace` (28 tests pass: 22 lib tests + 2 drift + multiple e2e gated skips). `helm lint` deferred to CI.
+- [x] T019 NEEDS CLARIFICATION grep clean (only meta-reference in `tasks.md`'s T019 description itself)
 
 ---
 
