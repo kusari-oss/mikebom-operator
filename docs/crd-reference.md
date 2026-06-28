@@ -164,7 +164,51 @@ The destination object key for each SBOM is
 
 ### OCI
 
-Wire-up lands in feature 006. Until then, setting `output.type: oci` makes the
-operator's `output-upload` container ship the v0.3 debug placeholder (a
-`ls && cat` of `/workdir/out/`) — useful for seeing what `mikebom-scan` would
-have produced without actually persisting it.
+Pushes each SBOM as an OCI artifact tagged with the scanned image's 7-character
+hash. Uses [ORAS](https://oras.land/) (a distroless image with no shell —
+arguments use Kubernetes `$(VAR)` substitution). Credentials come from a
+user-supplied Kubernetes Secret of type `kubernetes.io/dockerconfigjson`.
+
+```yaml
+apiVersion: kusari.dev/v1alpha1
+kind: NamespaceScan
+metadata:
+  name: scan-prod
+spec:
+  target:
+    namespaces: [prod]
+  schedule:
+    cron: "0 */6 * * *"
+  mikebomImage: ghcr.io/kusari-oss/mikebom:v0.1.0-alpha.51
+  scanFormat: cyclonedx-json
+  output:
+    type: oci
+    oci:
+      registry: ghcr.io                   # required
+      repository: kusari-oss/sboms        # required
+      credentialsSecretName: registry-creds  # required
+```
+
+Provision the Secret with `kubectl create secret docker-registry`:
+
+```sh
+kubectl create secret docker-registry registry-creds -n kusari-operator \
+  --docker-server=ghcr.io \
+  --docker-username=$GITHUB_USER \
+  --docker-password=$GITHUB_TOKEN
+```
+
+The `output-upload` container mounts the Secret read-only at `/docker-config/`
+(remapped from the standard `.dockerconfigjson` key to `config.json`) and
+exports `DOCKER_CONFIG=/docker-config` so `oras` finds the credentials at the
+expected path.
+
+Each SBOM lands at:
+
+```
+oci://<registry>/<repository>:<image-hash>
+```
+
+where `<image-hash>` is the 7-character SHA-256 prefix of the scanned image
+ref. The artifact's media type is `application/json` (CycloneDX/SPDX-specific
+media types are a future enhancement).

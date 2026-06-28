@@ -2,19 +2,25 @@
 //!
 //! Constructs a `batch/v1.Job` from a `NamespaceScanSpec` + image ref per
 //! `specs/003-scan-job-builder/contracts/build-scan-job.md`. No I/O, no
-//! reconciler integration — feature 004+ wires this into the controller
-//! and replaces the `output-upload` container with concrete backend code.
+//! reconciler integration (still — features 004/005/006 added real output
+//! backends but reconciler-spawns-Job wiring is a separate later feature).
 //!
 //! Container partition (per data-model.md §2):
 //!   initContainers = [init-pull, mikebom-scan]   // run sequentially
 //!   containers     = [output-upload]             // runs last; terminates pod
+//!
+//! Output-upload dispatch (see `specs/004-pvc-backend/contracts/output-backends.md`):
+//!   OutputType::Pvc → busybox + `cp` to a mounted PVC                 (feature 004)
+//!   OutputType::S3  → aws-cli + `aws s3 cp` with envFrom Secret creds (feature 005)
+//!   OutputType::Oci → ORAS + `oras push` with dockerconfigjson Secret (feature 006)
 
 use std::collections::BTreeMap;
 
 use k8s_openapi::api::batch::v1::{Job, JobSpec};
 use k8s_openapi::api::core::v1::{
-    Container, EmptyDirVolumeSource, EnvFromSource, EnvVar, PersistentVolumeClaimVolumeSource,
-    PodSpec, PodTemplateSpec, ResourceRequirements, SecretEnvSource, Volume, VolumeMount,
+    Container, EmptyDirVolumeSource, EnvFromSource, EnvVar, KeyToPath,
+    PersistentVolumeClaimVolumeSource, PodSpec, PodTemplateSpec, ResourceRequirements,
+    SecretEnvSource, SecretVolumeSource, Volume, VolumeMount,
 };
 use k8s_openapi::apimachinery::pkg::api::resource::Quantity;
 use k8s_openapi::apimachinery::pkg::apis::meta::v1::ObjectMeta;
@@ -22,7 +28,7 @@ use sha2::{Digest, Sha256};
 use thiserror::Error;
 
 use crate::crds::namespace_scan::{
-    NamespaceScanSpec, Output, OutputType, PvcOutput, S3Output, ScanFormat,
+    NamespaceScanSpec, OciOutput, OutputType, PvcOutput, S3Output, ScanFormat,
 };
 
 /// Hardcoded defaults for the v0.3 builder. Pinned to manifest digests per
@@ -41,9 +47,9 @@ pub mod defaults {
         "gcr.io/go-containerregistry/crane@sha256:1b1fb24d2b1bb27a9daf81a588157e68463876904e8e537a812edba6284fb252";
     // crane:debug latest as of 2026-06-28
 
-    /// Output-upload placeholder: Chainguard's free-tier distroless busybox.
-    /// Used for the v0.3 dispatch arm (OCI in v0.5 + earlier; feature 006 replaces).
-    pub const OUTPUT_UPLOAD_IMAGE: &str =
+    /// PVC upload image — Chainguard's free-tier distroless busybox. Ships
+    /// `sh + cp + mkdir` for the simple file-copy workflow that PVC needs.
+    pub const PVC_UPLOAD_IMAGE: &str =
         "cgr.dev/chainguard/busybox@sha256:accc5c911abaf2f70487f93cad07b0891d502cbba7e79f96d1db9074ef40928a";
     // latest as of 2026-06-28
 
@@ -55,6 +61,20 @@ pub mod defaults {
     pub const S3_UPLOAD_IMAGE: &str =
         "public.ecr.aws/aws-cli/aws-cli@sha256:749bfaf91d690b9a1768083822d620f96c19defdf9ca2dc227eb3695281fda5b";
     // aws-cli:latest as of 2026-06-28
+
+    /// OCI upload image — official ORAS distroless image (feature 006).
+    /// Publicly accessible via GHCR. Has no shell, so we use k8s container-arg
+    /// `$(VAR)` substitution rather than a shell script.
+    ///
+    /// Refresh via `crane digest ghcr.io/oras-project/oras:v1.2.0`.
+    pub const OCI_UPLOAD_IMAGE: &str =
+        "ghcr.io/oras-project/oras@sha256:0087224dd0decc354b5b0689068fbbc40cd5dc3dbf65fcb3868dfbd363dc790b";
+    // oras:v1.2.0 latest as of 2026-06-28
+
+    /// Volume name for the docker-registry credentials Secret mount.
+    pub const DOCKER_CONFIG_VOLUME_NAME: &str = "oci-credentials";
+    /// Mount path for the docker-registry credentials inside output-upload.
+    pub const DOCKER_CONFIG_MOUNT_PATH: &str = "/docker-config";
 
     pub const TTL_SECONDS_AFTER_FINISHED: i32 = 3600;
     pub const BACKOFF_LIMIT: i32 = 2;
@@ -84,6 +104,9 @@ pub enum BuildScanJobError {
 
     #[error("spec.output.type=S3 requires spec.output.s3 with non-empty bucket and credentialsSecretName")]
     MissingS3Config,
+
+    #[error("spec.output.type=Oci requires spec.output.oci with non-empty registry, repository, and credentialsSecretName")]
+    MissingOciConfig,
 }
 
 /// Build a 3-container scan Job for the given `NamespaceScan` CR and target image ref.
@@ -122,16 +145,31 @@ pub fn build_scan_job(
 
     // Output-upload container construction may fail (e.g., Pvc + missing claim_name);
     // bubble the error up before we start assembling the rest of the Job.
-    let output_upload = build_output_upload_container(&spec.output)?;
+    let output_upload = build_output_upload_container(spec, &short_hash)?;
 
-    // Pod-spec volumes always include `workdir`; PVC arm adds `pvc-output` when wired.
+    // Pod-spec volumes always include `workdir`; PVC and OCI arms add backend-specific
+    // volumes (PVC claim mount / docker-config secret) when wired.
     let mut volumes = vec![workdir_volume()];
-    if let OutputType::Pvc = spec.output.backend_type {
-        if let Some(pvc) = &spec.output.pvc {
-            if !pvc.claim_name.trim().is_empty() {
-                volumes.push(pvc_output_volume(&pvc.claim_name));
+    match spec.output.backend_type {
+        OutputType::Pvc => {
+            if let Some(pvc) = &spec.output.pvc {
+                if !pvc.claim_name.trim().is_empty() {
+                    volumes.push(pvc_output_volume(&pvc.claim_name));
+                }
             }
         }
+        OutputType::Oci => {
+            if let Some(oci) = &spec.output.oci {
+                if let Some(secret) = oci
+                    .credentials_secret_name
+                    .as_deref()
+                    .filter(|s| !s.trim().is_empty())
+                {
+                    volumes.push(oci_credentials_volume(secret));
+                }
+            }
+        }
+        OutputType::S3 => {}
     }
 
     Ok(Job {
@@ -293,23 +331,6 @@ fn build_mikebom_scan_container(
     }
 }
 
-/// v0.3 placeholder shape — busybox `ls && cat` against the workdir. Used when
-/// `output.type` is not yet wired (currently `S3` / `Oci`; features 005/006
-/// replace these arms with real backend code).
-fn build_output_upload_placeholder_container() -> Container {
-    Container {
-        name: "output-upload".to_string(),
-        image: Some(defaults::OUTPUT_UPLOAD_IMAGE.to_string()),
-        command: Some(vec![
-            "sh".to_string(),
-            "-c".to_string(),
-            "ls -la /workdir/out/ && cat /workdir/out/*.json".to_string(),
-        ]),
-        volume_mounts: Some(vec![workdir_mount()]),
-        ..Default::default()
-    }
-}
-
 /// Pod-spec `Volume` backed by the user-supplied PVC claim (feature 004).
 fn pvc_output_volume(claim_name: &str) -> Volume {
     Volume {
@@ -354,7 +375,7 @@ fn build_output_upload_pvc_container(pvc: &PvcOutput) -> Container {
         cp /workdir/out/*.json \"$DEST/\"";
     Container {
         name: "output-upload".to_string(),
-        image: Some(defaults::OUTPUT_UPLOAD_IMAGE.to_string()),
+        image: Some(defaults::PVC_UPLOAD_IMAGE.to_string()),
         command: Some(vec!["sh".to_string(), "-c".to_string(), script.to_string()]),
         env: Some(vec![EnvVar {
             name: "PATH_PREFIX".to_string(),
@@ -428,7 +449,15 @@ fn build_output_upload_s3_container(s3: &S3Output) -> Container {
 
 /// Dispatch on `output.type` to produce the appropriate `output-upload` container.
 /// See `specs/004-pvc-backend/contracts/output-backends.md` for the contract.
-fn build_output_upload_container(output: &Output) -> Result<Container, BuildScanJobError> {
+///
+/// The Oci arm needs `short_hash` and `scan_format` to construct the container's
+/// `$(VAR)`-substituted args, so the dispatch fn takes the full spec rather
+/// than just the `Output`.
+fn build_output_upload_container(
+    spec: &NamespaceScanSpec,
+    short_hash: &str,
+) -> Result<Container, BuildScanJobError> {
+    let output = &spec.output;
     match &output.backend_type {
         OutputType::Pvc => {
             let pvc = output
@@ -456,7 +485,109 @@ fn build_output_upload_container(output: &Output) -> Result<Container, BuildScan
             }
             Ok(build_output_upload_s3_container(s3))
         }
-        OutputType::Oci => Ok(build_output_upload_placeholder_container()),
+        OutputType::Oci => {
+            let oci = output
+                .oci
+                .as_ref()
+                .ok_or(BuildScanJobError::MissingOciConfig)?;
+            if oci.registry.trim().is_empty()
+                || oci.repository.trim().is_empty()
+                || oci
+                    .credentials_secret_name
+                    .as_deref()
+                    .map(|s| s.trim().is_empty())
+                    .unwrap_or(true)
+            {
+                return Err(BuildScanJobError::MissingOciConfig);
+            }
+            Ok(build_output_upload_oci_container(
+                oci,
+                short_hash,
+                &spec.scan_format,
+            ))
+        }
+    }
+}
+
+/// Pod-spec `Volume` projected from a docker-registry `Secret` of type
+/// `kubernetes.io/dockerconfigjson`. The Secret's standard `.dockerconfigjson`
+/// key is remapped to `config.json` inside the volume so `DOCKER_CONFIG`-aware
+/// tools (ORAS, crane, docker) find credentials at the expected path.
+fn oci_credentials_volume(secret_name: &str) -> Volume {
+    Volume {
+        name: defaults::DOCKER_CONFIG_VOLUME_NAME.to_string(),
+        secret: Some(SecretVolumeSource {
+            secret_name: Some(secret_name.to_string()),
+            items: Some(vec![KeyToPath {
+                key: ".dockerconfigjson".to_string(),
+                path: "config.json".to_string(),
+                ..Default::default()
+            }]),
+            ..Default::default()
+        }),
+        ..Default::default()
+    }
+}
+
+/// Read-only mount of the docker-registry Secret inside `output-upload`.
+fn oci_credentials_mount() -> VolumeMount {
+    VolumeMount {
+        name: defaults::DOCKER_CONFIG_VOLUME_NAME.to_string(),
+        mount_path: defaults::DOCKER_CONFIG_MOUNT_PATH.to_string(),
+        read_only: Some(true),
+        ..Default::default()
+    }
+}
+
+/// Oci-variant `output-upload` container — `oras push` of the SBOM as an OCI
+/// artifact tagged with the image hash. ORAS is distroless (no shell), so all
+/// variable expansion uses k8s container-arg `$(VAR)` substitution. The SBOM
+/// file path (`/workdir/out/<hash>.<ext>`) is fully known at builder time;
+/// `IMAGE_HASH` and `SBOM_EXT` env vars are populated for the substitution.
+fn build_output_upload_oci_container(
+    oci: &OciOutput,
+    short_hash: &str,
+    scan_format: &ScanFormat,
+) -> Container {
+    let (_format_arg, sbom_ext) = scan_format_args(scan_format);
+    Container {
+        name: "output-upload".to_string(),
+        image: Some(defaults::OCI_UPLOAD_IMAGE.to_string()),
+        // ORAS has ENTRYPOINT=["oras"] so we pass push args directly.
+        args: Some(vec![
+            "push".to_string(),
+            "$(OCI_REGISTRY)/$(OCI_REPOSITORY):$(IMAGE_HASH)".to_string(),
+            "/workdir/out/$(IMAGE_HASH).$(SBOM_EXT):application/json".to_string(),
+        ]),
+        env: Some(vec![
+            EnvVar {
+                name: "OCI_REGISTRY".to_string(),
+                value: Some(oci.registry.clone()),
+                ..Default::default()
+            },
+            EnvVar {
+                name: "OCI_REPOSITORY".to_string(),
+                value: Some(oci.repository.clone()),
+                ..Default::default()
+            },
+            EnvVar {
+                name: "IMAGE_HASH".to_string(),
+                value: Some(short_hash.to_string()),
+                ..Default::default()
+            },
+            EnvVar {
+                name: "SBOM_EXT".to_string(),
+                value: Some(sbom_ext.to_string()),
+                ..Default::default()
+            },
+            EnvVar {
+                name: "DOCKER_CONFIG".to_string(),
+                value: Some(defaults::DOCKER_CONFIG_MOUNT_PATH.to_string()),
+                ..Default::default()
+            },
+        ]),
+        volume_mounts: Some(vec![workdir_mount(), oci_credentials_mount()]),
+        ..Default::default()
     }
 }
 
@@ -487,16 +618,21 @@ mod tests {
             },
             mikebom_image: "ghcr.io/kusari-oss/mikebom:v0.1.0-alpha.51".to_string(),
             scan_format: ScanFormat::CyclonedxJson,
-            // Feature 005 dispatch: use OutputType::Oci so the inherited tests
-            // exercise the remaining placeholder branch. (Previous backends
-            // require validated config now: Pvc → MissingPvcConfig if
-            // pvc=None, S3 → MissingS3Config if s3=None.) Feature 006 will
-            // need to migrate this again when it lands.
+            // Feature 006: all 3 backends are now real; there is no placeholder
+            // branch left. Populate a valid OCI config so inherited tests that
+            // assert generic Job-shape invariants continue to succeed. Tests
+            // that care about *specific* dispatch shape use a per-backend
+            // fixture (valid_pvc_spec, valid_s3_spec, valid_oci_spec) and
+            // override the relevant fields.
             output: Output {
                 backend_type: OutputType::Oci,
                 pvc: None,
                 s3: None,
-                oci: None,
+                oci: Some(OciOutput {
+                    registry: "ghcr.io".to_string(),
+                    repository: "kusari-oss/sboms".to_string(),
+                    credentials_secret_name: Some("registry-creds".to_string()),
+                }),
             },
         }
     }
@@ -670,21 +806,10 @@ mod tests {
         }
     }
 
-    #[test]
-    fn output_upload_oci_is_v03_placeholder() {
-        let job = build_scan_job(&valid_spec(), "scan-prod", "nginx:1.27.0").unwrap();
-        let upload = &pod_spec(&job).containers[0];
-        assert_eq!(upload.image.as_deref(), Some(defaults::OUTPUT_UPLOAD_IMAGE));
-        let cmd = upload.command.as_ref().unwrap().join(" ");
-        assert!(
-            cmd.contains("ls -la /workdir/out/"),
-            "output-upload missing ls: {cmd}"
-        );
-        assert!(
-            cmd.contains("cat /workdir/out/*.json"),
-            "output-upload missing cat: {cmd}",
-        );
-    }
+    // (Feature 003's `output_upload_oci_is_v03_placeholder` was deleted in
+    // feature 006: there is no more placeholder dispatch arm. All 3 backends
+    // now produce real upload containers. OCI's real shape is covered by the
+    // feature-006 tests below.)
 
     #[test]
     fn all_container_images_are_pinned() {
@@ -1052,6 +1177,183 @@ mod tests {
         assert_eq!(
             build_scan_job(&s, "scan-prod", "nginx:1.27.0").unwrap_err(),
             BuildScanJobError::MissingS3Config,
+        );
+    }
+
+    // ---------- Feature 006 — OCI registry output backend ----------
+
+    fn valid_oci_spec(
+        registry: &str,
+        repository: &str,
+        credentials_secret_name: Option<&str>,
+    ) -> NamespaceScanSpec {
+        let mut spec = valid_spec();
+        spec.output = Output {
+            backend_type: OutputType::Oci,
+            pvc: None,
+            s3: None,
+            oci: Some(OciOutput {
+                registry: registry.to_string(),
+                repository: repository.to_string(),
+                credentials_secret_name: credentials_secret_name.map(|s| s.to_string()),
+            }),
+        };
+        spec
+    }
+
+    #[test]
+    fn oci_dispatch_uses_oras_image() {
+        let spec = valid_oci_spec("ghcr.io", "kusari-oss/sboms", Some("registry-creds"));
+        let job = build_scan_job(&spec, "scan-prod", "nginx:1.27.0").unwrap();
+        let upload = &pod_spec(&job).containers[0];
+        assert_eq!(upload.image.as_deref(), Some(defaults::OCI_UPLOAD_IMAGE));
+    }
+
+    #[test]
+    fn oci_output_upload_uses_oras_push() {
+        let spec = valid_oci_spec("ghcr.io", "kusari-oss/sboms", Some("registry-creds"));
+        let job = build_scan_job(&spec, "scan-prod", "nginx:1.27.0").unwrap();
+        let upload = &pod_spec(&job).containers[0];
+        // ORAS is distroless — we pass args, not a command.
+        let args = upload.args.as_ref().expect("oras args required");
+        assert_eq!(args[0], "push");
+        assert!(
+            args[1].contains("$(OCI_REGISTRY)") && args[1].contains("$(OCI_REPOSITORY)"),
+            "oras push target missing var substitution: {args:?}",
+        );
+        assert!(
+            args[2].contains("/workdir/out/") && args[2].contains(":application/json"),
+            "oras push file path missing /workdir/out/ or media type: {args:?}",
+        );
+    }
+
+    #[test]
+    fn oci_env_carries_registry_repository_and_image_hash() {
+        let spec = valid_oci_spec("ghcr.io", "kusari-oss/sboms", Some("registry-creds"));
+        let job = build_scan_job(&spec, "scan-prod", "nginx:1.27.0").unwrap();
+        let upload = &pod_spec(&job).containers[0];
+        let env = upload.env.as_ref().unwrap();
+        assert!(env
+            .iter()
+            .any(|e| e.name == "OCI_REGISTRY" && e.value.as_deref() == Some("ghcr.io")));
+        assert!(env
+            .iter()
+            .any(|e| e.name == "OCI_REPOSITORY" && e.value.as_deref() == Some("kusari-oss/sboms")));
+        assert!(env.iter().any(|e| e.name == "IMAGE_HASH"
+            && e.value
+                .as_deref()
+                .map(|v| !v.is_empty() && v.len() == 7)
+                .unwrap_or(false)));
+        assert!(env.iter().any(|e| e.name == "DOCKER_CONFIG"
+            && e.value.as_deref() == Some(defaults::DOCKER_CONFIG_MOUNT_PATH)));
+    }
+
+    #[test]
+    fn oci_credentials_volume_mounted_at_known_path() {
+        let spec = valid_oci_spec("ghcr.io", "kusari-oss/sboms", Some("registry-creds"));
+        let job = build_scan_job(&spec, "scan-prod", "nginx:1.27.0").unwrap();
+        let ps = pod_spec(&job);
+        let volumes = ps.volumes.as_ref().unwrap();
+        let cred_vol = volumes
+            .iter()
+            .find(|v| v.name == defaults::DOCKER_CONFIG_VOLUME_NAME)
+            .expect("oci-credentials volume must exist");
+        let secret_src = cred_vol
+            .secret
+            .as_ref()
+            .expect("oci-credentials must use a Secret projection");
+        assert_eq!(secret_src.secret_name.as_deref(), Some("registry-creds"));
+        // The .dockerconfigjson key must be remapped to config.json for
+        // DOCKER_CONFIG-aware tools.
+        let items = secret_src.items.as_ref().expect("items remap required");
+        assert!(items
+            .iter()
+            .any(|i| i.key == ".dockerconfigjson" && i.path == "config.json"));
+
+        // And output-upload must mount it at the conventional path, read-only.
+        let upload = &ps.containers[0];
+        let mounts = upload.volume_mounts.as_ref().unwrap();
+        let cred_mount = mounts
+            .iter()
+            .find(|m| m.name == defaults::DOCKER_CONFIG_VOLUME_NAME)
+            .expect("output-upload must mount the credentials volume");
+        assert_eq!(cred_mount.mount_path, defaults::DOCKER_CONFIG_MOUNT_PATH);
+        assert_eq!(cred_mount.read_only, Some(true));
+    }
+
+    #[test]
+    fn oci_credentials_volume_only_on_output_upload() {
+        let spec = valid_oci_spec("ghcr.io", "kusari-oss/sboms", Some("registry-creds"));
+        let job = build_scan_job(&spec, "scan-prod", "nginx:1.27.0").unwrap();
+        let ps = pod_spec(&job);
+        // FR-007 blast-radius: init-pull and mikebom-scan must NOT mount the
+        // registry credentials — a compromised scan can't exfiltrate them.
+        for c in ps.init_containers.as_ref().unwrap() {
+            let mounts = c.volume_mounts.as_ref().unwrap();
+            assert!(
+                !mounts
+                    .iter()
+                    .any(|m| m.name == defaults::DOCKER_CONFIG_VOLUME_NAME),
+                "container {} unexpectedly mounts oci credentials",
+                c.name,
+            );
+        }
+    }
+
+    #[test]
+    fn oci_sbom_ext_matches_scan_format() {
+        for (format, expected_ext) in [
+            (ScanFormat::CyclonedxJson, "cdx.json"),
+            (ScanFormat::Spdx23Json, "spdx.json"),
+            (ScanFormat::Spdx3Json, "spdx3.json"),
+        ] {
+            let mut spec = valid_oci_spec("ghcr.io", "kusari-oss/sboms", Some("registry-creds"));
+            spec.scan_format = format;
+            let job = build_scan_job(&spec, "scan-prod", "nginx:1.27.0").unwrap();
+            let upload = &pod_spec(&job).containers[0];
+            let env = upload.env.as_ref().unwrap();
+            assert!(
+                env.iter()
+                    .any(|e| e.name == "SBOM_EXT" && e.value.as_deref() == Some(expected_ext)),
+                "SBOM_EXT should be {expected_ext}; got env {env:?}",
+            );
+        }
+    }
+
+    #[test]
+    fn missing_oci_config_errors_when_oci_none() {
+        let mut spec = valid_spec();
+        spec.output.backend_type = OutputType::Oci;
+        spec.output.oci = None;
+        let err = build_scan_job(&spec, "scan-prod", "nginx:1.27.0").unwrap_err();
+        assert_eq!(err, BuildScanJobError::MissingOciConfig);
+    }
+
+    #[test]
+    fn missing_oci_config_errors_when_required_fields_empty() {
+        // Empty registry
+        let s = valid_oci_spec("", "kusari-oss/sboms", Some("registry-creds"));
+        assert_eq!(
+            build_scan_job(&s, "scan-prod", "nginx:1.27.0").unwrap_err(),
+            BuildScanJobError::MissingOciConfig,
+        );
+        // Empty repository
+        let s = valid_oci_spec("ghcr.io", "", Some("registry-creds"));
+        assert_eq!(
+            build_scan_job(&s, "scan-prod", "nginx:1.27.0").unwrap_err(),
+            BuildScanJobError::MissingOciConfig,
+        );
+        // Missing credentials
+        let s = valid_oci_spec("ghcr.io", "kusari-oss/sboms", None);
+        assert_eq!(
+            build_scan_job(&s, "scan-prod", "nginx:1.27.0").unwrap_err(),
+            BuildScanJobError::MissingOciConfig,
+        );
+        // Whitespace credentials
+        let s = valid_oci_spec("ghcr.io", "kusari-oss/sboms", Some("   "));
+        assert_eq!(
+            build_scan_job(&s, "scan-prod", "nginx:1.27.0").unwrap_err(),
+            BuildScanJobError::MissingOciConfig,
         );
     }
 }

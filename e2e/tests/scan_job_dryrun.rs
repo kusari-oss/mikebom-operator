@@ -174,3 +174,42 @@ fn s3_scan_job_passes_server_dry_run() {
         kubectl_dry_run_apply(&yaml);
     }
 }
+
+fn valid_oci_spec(format: ScanFormat) -> NamespaceScanSpec {
+    use operator::crds::namespace_scan::OciOutput;
+    let mut spec = valid_spec(format);
+    spec.output = Output {
+        backend_type: OutputType::Oci,
+        pvc: None,
+        s3: None,
+        oci: Some(OciOutput {
+            registry: "ghcr.io".to_string(),
+            repository: "kusari-oss/sboms".to_string(),
+            credentials_secret_name: Some("registry-creds".to_string()),
+        }),
+    };
+    spec
+}
+
+#[test]
+fn oci_scan_job_passes_server_dry_run() {
+    if std::env::var("MIKEBOM_OPERATOR_E2E").ok().as_deref() != Some("1") {
+        eprintln!("MIKEBOM_OPERATOR_E2E unset; skipping kind-based dry-run E2E (OCI).");
+        return;
+    }
+
+    for variant in [
+        ScanFormat::CyclonedxJson,
+        ScanFormat::Spdx23Json,
+        ScanFormat::Spdx3Json,
+    ] {
+        let spec = valid_oci_spec(variant);
+        let job = build_scan_job(&spec, "scan-prod", "nginx:1.27.0")
+            .expect("OCI builder should succeed for valid inputs");
+        let yaml = serde_yaml::to_string(&job).expect("YAML serialize");
+        // The registry-creds Secret of type dockerconfigjson does not need to
+        // exist for kubectl --dry-run=server; volume mount references are
+        // validated syntactically only.
+        kubectl_dry_run_apply(&yaml);
+    }
+}
