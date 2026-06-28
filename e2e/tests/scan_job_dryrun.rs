@@ -134,3 +134,43 @@ fn pvc_scan_job_passes_server_dry_run() {
         kubectl_dry_run_apply(&yaml);
     }
 }
+
+fn valid_s3_spec(format: ScanFormat) -> NamespaceScanSpec {
+    use operator::crds::namespace_scan::S3Output;
+    let mut spec = valid_spec(format);
+    spec.output = Output {
+        backend_type: OutputType::S3,
+        pvc: None,
+        s3: Some(S3Output {
+            bucket: "sboms-prod".to_string(),
+            region: "us-west-2".to_string(),
+            path_prefix: Some("team-a".to_string()),
+            credentials_secret_name: Some("aws-creds".to_string()),
+        }),
+        oci: None,
+    };
+    spec
+}
+
+#[test]
+fn s3_scan_job_passes_server_dry_run() {
+    if std::env::var("MIKEBOM_OPERATOR_E2E").ok().as_deref() != Some("1") {
+        eprintln!("MIKEBOM_OPERATOR_E2E unset; skipping kind-based dry-run E2E (S3).");
+        return;
+    }
+
+    for variant in [
+        ScanFormat::CyclonedxJson,
+        ScanFormat::Spdx23Json,
+        ScanFormat::Spdx3Json,
+    ] {
+        let spec = valid_s3_spec(variant);
+        let job = build_scan_job(&spec, "scan-prod", "nginx:1.27.0")
+            .expect("S3 builder should succeed for valid inputs");
+        let yaml = serde_yaml::to_string(&job).expect("YAML serialize");
+        // Note: kubectl --dry-run=server validates the manifest references
+        // syntactically. The aws-creds Secret doesn't need to exist; the API
+        // server doesn't check Secret existence for envFrom at dry-run time.
+        kubectl_dry_run_apply(&yaml);
+    }
+}
