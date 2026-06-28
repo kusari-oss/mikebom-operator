@@ -107,6 +107,13 @@ pub struct S3Output {
 pub struct OciOutput {
     pub registry: String,
     pub repository: String,
+    /// Name of a Kubernetes Secret of type `kubernetes.io/dockerconfigjson` in
+    /// the operator's namespace. The output-upload container mounts this Secret
+    /// at `/docker-config/config.json` (via the standard `.dockerconfigjson`
+    /// key) and exports `DOCKER_CONFIG=/docker-config` so `oras` (and any other
+    /// docker-config-aware tool) finds the credentials.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub credentials_secret_name: Option<String>,
 }
 
 #[derive(Deserialize, Serialize, Clone, Debug, Default, JsonSchema)]
