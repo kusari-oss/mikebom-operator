@@ -1,3 +1,3 @@
 <!-- SPECKIT START -->
-Active plan: [specs/001-crd-yaml-generator/plan.md](specs/001-crd-yaml-generator/plan.md)
+Active plan: [specs/002-reconciler-skeleton/plan.md](specs/002-reconciler-skeleton/plan.md)
 <!-- SPECKIT END -->
