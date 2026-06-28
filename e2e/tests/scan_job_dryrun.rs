@@ -99,3 +99,38 @@ fn empty_mikebom_image_returns_error_path() {
     let err = build_scan_job(&spec, "scan-prod", "nginx:1.27.0").unwrap_err();
     assert_eq!(err, BuildScanJobError::EmptyMikebomImage);
 }
+
+fn valid_pvc_spec(format: ScanFormat) -> NamespaceScanSpec {
+    use operator::crds::namespace_scan::PvcOutput;
+    let mut spec = valid_spec(format);
+    spec.output = Output {
+        backend_type: OutputType::Pvc,
+        pvc: Some(PvcOutput {
+            claim_name: "sbom-scratch".to_string(),
+            path_prefix: Some("team-a".to_string()),
+        }),
+        s3: None,
+        oci: None,
+    };
+    spec
+}
+
+#[test]
+fn pvc_scan_job_passes_server_dry_run() {
+    if std::env::var("MIKEBOM_OPERATOR_E2E").ok().as_deref() != Some("1") {
+        eprintln!("MIKEBOM_OPERATOR_E2E unset; skipping kind-based dry-run E2E (PVC).");
+        return;
+    }
+
+    for variant in [
+        ScanFormat::CyclonedxJson,
+        ScanFormat::Spdx23Json,
+        ScanFormat::Spdx3Json,
+    ] {
+        let spec = valid_pvc_spec(variant);
+        let job = build_scan_job(&spec, "scan-prod", "nginx:1.27.0")
+            .expect("PVC builder should succeed for valid inputs");
+        let yaml = serde_yaml::to_string(&job).expect("YAML serialize");
+        kubectl_dry_run_apply(&yaml);
+    }
+}

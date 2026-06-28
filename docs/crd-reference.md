@@ -62,3 +62,66 @@ Reserved for future features (do not repurpose):
 | `ScanFailed`        | feature 003 |
 | `ScanCompleted`     | feature 003 (with `status=True`) |
 | `RBACInsufficient`  | feature 003+ (per constitution principle III) |
+
+## Output backends
+
+`spec.output.type` selects how scan SBOMs leave the Job pod. v0.4 ships the PVC
+backend; features 005 and 006 layer S3 and OCI-registry-as-storage on the same
+dispatch.
+
+### PVC
+
+```yaml
+apiVersion: kusari.dev/v1alpha1
+kind: NamespaceScan
+metadata:
+  name: scan-prod
+spec:
+  target:
+    namespaces: [prod]
+  schedule:
+    cron: "0 */6 * * *"
+  mikebomImage: ghcr.io/kusari-oss/mikebom:v0.1.0-alpha.51
+  scanFormat: cyclonedx-json
+  output:
+    type: pvc
+    pvc:
+      claimName: sbom-scratch   # required; PVC must already exist in the operator namespace
+      pathPrefix: "team-a"       # optional; literal directory name relative to /pvc-output
+```
+
+When the operator's `output-upload` container runs against this CR, it copies
+every `/workdir/out/*.json` SBOM produced by `mikebom-scan` to
+`/pvc-output/team-a/` inside the PVC's filesystem. With `pathPrefix` unset or
+empty, SBOMs land at the PVC mount root.
+
+The operator does **not** create the PVC. Provision it yourself:
+
+```sh
+kubectl apply -n kusari-operator -f - <<'YAML'
+apiVersion: v1
+kind: PersistentVolumeClaim
+metadata:
+  name: sbom-scratch
+spec:
+  accessModes: [ReadWriteMany]      # or ReadWriteOnce if you don't run concurrent scans
+  resources:
+    requests:
+      storage: 10Gi
+  storageClassName: standard
+YAML
+```
+
+Access-mode guidance:
+
+| Access mode | When to use |
+|-------------|-------------|
+| `ReadWriteOnce` (RWO) | Single-node cluster, or one scan at a time per NamespaceScan |
+| `ReadWriteMany` (RWX) | Multi-node cluster running concurrent scans (NFS, CephFS, EFS, etc.) |
+
+### S3 and OCI
+
+Wire-up lands in features 005 (S3) and 006 (OCI). Until then, setting
+`output.type: s3` or `oci` makes the operator's `output-upload` container ship
+the v0.3 debug placeholder (a `ls && cat` of `/workdir/out/`) — useful for
+seeing what `mikebom-scan` would have produced without actually persisting it.

@@ -11,6 +11,18 @@ mikebom:
 defaults:
   scanFormat: cyclonedx-json
 
+# Default output backend for Helm-managed NamespaceScan templates.
+# The operator does NOT create the PVC — the cluster admin provisions it.
+# Supported types: pvc. (S3 lands in feature 005; OCI in feature 006.)
+#
+# Example:
+#   output:
+#     type: pvc
+#     pvc:
+#       claimName: sbom-scratch         # required when type=pvc
+#       pathPrefix: ""                  # optional; literal directory name relative to /pvc-output
+output: {}
+
 rbac:
   create: true
 
