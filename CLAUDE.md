@@ -1,3 +1,3 @@
 <!-- SPECKIT START -->
-Active plan: [specs/003-scan-job-builder/plan.md](specs/003-scan-job-builder/plan.md)
+Active plan: [specs/004-pvc-backend/plan.md](specs/004-pvc-backend/plan.md)
 <!-- SPECKIT END -->

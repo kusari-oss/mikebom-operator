@@ -13,15 +13,15 @@ use std::collections::BTreeMap;
 
 use k8s_openapi::api::batch::v1::{Job, JobSpec};
 use k8s_openapi::api::core::v1::{
-    Container, EmptyDirVolumeSource, EnvVar, PodSpec, PodTemplateSpec, ResourceRequirements,
-    Volume, VolumeMount,
+    Container, EmptyDirVolumeSource, EnvVar, PersistentVolumeClaimVolumeSource, PodSpec,
+    PodTemplateSpec, ResourceRequirements, Volume, VolumeMount,
 };
 use k8s_openapi::apimachinery::pkg::api::resource::Quantity;
 use k8s_openapi::apimachinery::pkg::apis::meta::v1::ObjectMeta;
 use sha2::{Digest, Sha256};
 use thiserror::Error;
 
-use crate::crds::namespace_scan::{NamespaceScanSpec, ScanFormat};
+use crate::crds::namespace_scan::{NamespaceScanSpec, Output, OutputType, PvcOutput, ScanFormat};
 
 /// Hardcoded defaults for the v0.3 builder. Pinned to manifest digests per
 /// feature 001's constitution-VII pinning convention.
@@ -49,6 +49,12 @@ pub mod defaults {
     pub const BACKOFF_LIMIT: i32 = 2;
     pub const SCAN_CPU_REQUEST: &str = "100m";
     pub const SCAN_MEMORY_REQUEST: &str = "128Mi";
+
+    /// Pod-spec volume name for the PVC output backend (feature 004).
+    pub const PVC_VOLUME_NAME: &str = "pvc-output";
+
+    /// Mount path inside the `output-upload` container where the PVC volume appears.
+    pub const PVC_MOUNT_PATH: &str = "/pvc-output";
 }
 
 /// Failure modes for `build_scan_job`. Two narrow cases caught before
@@ -61,6 +67,9 @@ pub enum BuildScanJobError {
 
     #[error("image_ref is empty or whitespace-only")]
     EmptyImageRef,
+
+    #[error("spec.output.type=Pvc requires spec.output.pvc.claimName to be non-empty")]
+    MissingPvcConfig,
 }
 
 /// Build a 3-container scan Job for the given `NamespaceScan` CR and target image ref.
@@ -97,6 +106,20 @@ pub fn build_scan_job(
         ("kusari.dev/image-ref-hash".to_string(), short_hash.clone()),
     ]);
 
+    // Output-upload container construction may fail (e.g., Pvc + missing claim_name);
+    // bubble the error up before we start assembling the rest of the Job.
+    let output_upload = build_output_upload_container(&spec.output)?;
+
+    // Pod-spec volumes always include `workdir`; PVC arm adds `pvc-output` when wired.
+    let mut volumes = vec![workdir_volume()];
+    if let OutputType::Pvc = spec.output.backend_type {
+        if let Some(pvc) = &spec.output.pvc {
+            if !pvc.claim_name.trim().is_empty() {
+                volumes.push(pvc_output_volume(&pvc.claim_name));
+            }
+        }
+    }
+
     Ok(Job {
         metadata: ObjectMeta {
             name: Some(name),
@@ -115,12 +138,12 @@ pub fn build_scan_job(
                 }),
                 spec: Some(PodSpec {
                     restart_policy: Some("Never".to_string()),
-                    volumes: Some(vec![workdir_volume()]),
+                    volumes: Some(volumes),
                     init_containers: Some(vec![
                         build_init_pull_container(image_ref),
                         build_mikebom_scan_container(spec, &short_hash, mikebom_image),
                     ]),
-                    containers: vec![build_output_upload_container()],
+                    containers: vec![output_upload],
                     ..Default::default()
                 }),
             },
@@ -256,7 +279,10 @@ fn build_mikebom_scan_container(
     }
 }
 
-fn build_output_upload_container() -> Container {
+/// v0.3 placeholder shape — busybox `ls && cat` against the workdir. Used when
+/// `output.type` is not yet wired (currently `S3` / `Oci`; features 005/006
+/// replace these arms with real backend code).
+fn build_output_upload_placeholder_container() -> Container {
     Container {
         name: "output-upload".to_string(),
         image: Some(defaults::OUTPUT_UPLOAD_IMAGE.to_string()),
@@ -267,6 +293,80 @@ fn build_output_upload_container() -> Container {
         ]),
         volume_mounts: Some(vec![workdir_mount()]),
         ..Default::default()
+    }
+}
+
+/// Pod-spec `Volume` backed by the user-supplied PVC claim (feature 004).
+fn pvc_output_volume(claim_name: &str) -> Volume {
+    Volume {
+        name: defaults::PVC_VOLUME_NAME.to_string(),
+        persistent_volume_claim: Some(PersistentVolumeClaimVolumeSource {
+            claim_name: claim_name.to_string(),
+            read_only: None,
+        }),
+        ..Default::default()
+    }
+}
+
+/// `VolumeMount` for the PVC, mounted only on `output-upload` (FR-007).
+fn pvc_output_mount() -> VolumeMount {
+    VolumeMount {
+        name: defaults::PVC_VOLUME_NAME.to_string(),
+        mount_path: defaults::PVC_MOUNT_PATH.to_string(),
+        ..Default::default()
+    }
+}
+
+/// Strip a single leading `/` from `s` per FR-008. Idempotent: `"team-a"` stays
+/// `"team-a"`; `"/team-a"` becomes `"team-a"`; `"//team-a"` becomes `"/team-a"`.
+fn strip_leading_slash(s: &str) -> &str {
+    s.strip_prefix('/').unwrap_or(s)
+}
+
+/// Pvc-variant `output-upload` container — copies SBOMs from `/workdir/out/`
+/// into the PVC mount path (optionally under `pathPrefix`).
+fn build_output_upload_pvc_container(pvc: &PvcOutput) -> Container {
+    let path_prefix = pvc
+        .path_prefix
+        .as_deref()
+        .map(strip_leading_slash)
+        .unwrap_or("");
+    // `set -eu` halts on error; `${PATH_PREFIX:+/${PATH_PREFIX}}` emits `/<value>`
+    // when PATH_PREFIX is non-empty, nothing otherwise. Avoids brittle string-trim
+    // on a leading-slash boundary.
+    let script = "set -eu\n\
+        DEST=\"/pvc-output${PATH_PREFIX:+/${PATH_PREFIX}}\"\n\
+        mkdir -p \"$DEST\"\n\
+        cp /workdir/out/*.json \"$DEST/\"";
+    Container {
+        name: "output-upload".to_string(),
+        image: Some(defaults::OUTPUT_UPLOAD_IMAGE.to_string()),
+        command: Some(vec!["sh".to_string(), "-c".to_string(), script.to_string()]),
+        env: Some(vec![EnvVar {
+            name: "PATH_PREFIX".to_string(),
+            value: Some(path_prefix.to_string()),
+            ..Default::default()
+        }]),
+        volume_mounts: Some(vec![workdir_mount(), pvc_output_mount()]),
+        ..Default::default()
+    }
+}
+
+/// Dispatch on `output.type` to produce the appropriate `output-upload` container.
+/// See `specs/004-pvc-backend/contracts/output-backends.md` for the contract.
+fn build_output_upload_container(output: &Output) -> Result<Container, BuildScanJobError> {
+    match &output.backend_type {
+        OutputType::Pvc => {
+            let pvc = output
+                .pvc
+                .as_ref()
+                .ok_or(BuildScanJobError::MissingPvcConfig)?;
+            if pvc.claim_name.trim().is_empty() {
+                return Err(BuildScanJobError::MissingPvcConfig);
+            }
+            Ok(build_output_upload_pvc_container(pvc))
+        }
+        OutputType::S3 | OutputType::Oci => Ok(build_output_upload_placeholder_container()),
     }
 }
 
@@ -297,8 +397,11 @@ mod tests {
             },
             mikebom_image: "ghcr.io/kusari-oss/mikebom:v0.1.0-alpha.51".to_string(),
             scan_format: ScanFormat::CyclonedxJson,
+            // Feature 004 dispatch: use OutputType::S3 so the inherited tests
+            // exercise the placeholder branch (Pvc with `pvc: None` would now
+            // return MissingPvcConfig). Feature 005 will tighten when it lands.
             output: Output {
-                backend_type: OutputType::Pvc,
+                backend_type: OutputType::S3,
                 pvc: None,
                 s3: None,
                 oci: None,
@@ -476,7 +579,7 @@ mod tests {
     }
 
     #[test]
-    fn output_upload_is_v03_placeholder() {
+    fn output_upload_non_pvc_is_v03_placeholder() {
         let job = build_scan_job(&valid_spec(), "scan-prod", "nginx:1.27.0").unwrap();
         let upload = &pod_spec(&job).containers[0];
         assert_eq!(upload.image.as_deref(), Some(defaults::OUTPUT_UPLOAD_IMAGE));
@@ -556,5 +659,166 @@ mod tests {
             .expect("mikebom-scan resources.requests");
         assert!(requests.contains_key("cpu"), "missing cpu request");
         assert!(requests.contains_key("memory"), "missing memory request");
+    }
+
+    // ---------- Feature 004 — PVC output backend (US1) ----------
+
+    use crate::crds::namespace_scan::PvcOutput;
+
+    fn valid_pvc_spec(claim_name: &str, path_prefix: Option<&str>) -> NamespaceScanSpec {
+        let mut spec = valid_spec();
+        spec.output = Output {
+            backend_type: OutputType::Pvc,
+            pvc: Some(PvcOutput {
+                claim_name: claim_name.to_string(),
+                path_prefix: path_prefix.map(|s| s.to_string()),
+            }),
+            s3: None,
+            oci: None,
+        };
+        spec
+    }
+
+    #[test]
+    fn pvc_dispatch_adds_pvc_volume_to_pod_spec() {
+        let job = build_scan_job(
+            &valid_pvc_spec("sbom-scratch", None),
+            "scan-prod",
+            "nginx:1.27.0",
+        )
+        .unwrap();
+        let ps = pod_spec(&job);
+        let volumes = ps.volumes.as_ref().unwrap();
+        let pvc_vol = volumes
+            .iter()
+            .find(|v| v.name == defaults::PVC_VOLUME_NAME)
+            .expect("pvc-output volume must be present");
+        let pvc_src = pvc_vol
+            .persistent_volume_claim
+            .as_ref()
+            .expect("pvc volume needs persistent_volume_claim source");
+        assert_eq!(pvc_src.claim_name, "sbom-scratch");
+    }
+
+    #[test]
+    fn pvc_output_upload_mounts_pvc_at_known_path() {
+        let job = build_scan_job(
+            &valid_pvc_spec("sbom-scratch", None),
+            "scan-prod",
+            "nginx:1.27.0",
+        )
+        .unwrap();
+        let upload = &pod_spec(&job).containers[0];
+        let mounts = upload.volume_mounts.as_ref().unwrap();
+        assert!(
+            mounts
+                .iter()
+                .any(|m| m.name == defaults::PVC_VOLUME_NAME
+                    && m.mount_path == defaults::PVC_MOUNT_PATH),
+            "output-upload missing {} mount at {}",
+            defaults::PVC_VOLUME_NAME,
+            defaults::PVC_MOUNT_PATH,
+        );
+    }
+
+    #[test]
+    fn pvc_volume_mounted_only_on_output_upload() {
+        let job = build_scan_job(
+            &valid_pvc_spec("sbom-scratch", None),
+            "scan-prod",
+            "nginx:1.27.0",
+        )
+        .unwrap();
+        let ps = pod_spec(&job);
+        // init-pull (index 0) and mikebom-scan (index 1) MUST NOT mount the PVC.
+        for c in ps.init_containers.as_ref().unwrap() {
+            let mounts = c.volume_mounts.as_ref().unwrap();
+            assert!(
+                !mounts.iter().any(|m| m.name == defaults::PVC_VOLUME_NAME),
+                "container {} unexpectedly mounts {}",
+                c.name,
+                defaults::PVC_VOLUME_NAME,
+            );
+        }
+    }
+
+    #[test]
+    fn pvc_output_upload_copies_to_pvc_mount() {
+        let job = build_scan_job(
+            &valid_pvc_spec("sbom-scratch", None),
+            "scan-prod",
+            "nginx:1.27.0",
+        )
+        .unwrap();
+        let upload = &pod_spec(&job).containers[0];
+        let cmd = upload.command.as_ref().unwrap().join("\n");
+        assert!(
+            cmd.contains("mkdir -p"),
+            "output-upload missing mkdir -p: {cmd}"
+        );
+        assert!(
+            cmd.contains("cp /workdir/out/*.json"),
+            "output-upload missing cp command: {cmd}",
+        );
+        assert!(
+            cmd.contains("PATH_PREFIX"),
+            "output-upload should read PATH_PREFIX env: {cmd}",
+        );
+    }
+
+    #[test]
+    fn pvc_output_upload_respects_path_prefix() {
+        let job = build_scan_job(
+            &valid_pvc_spec("sbom-scratch", Some("team-a")),
+            "scan-prod",
+            "nginx:1.27.0",
+        )
+        .unwrap();
+        let upload = &pod_spec(&job).containers[0];
+        let env = upload
+            .env
+            .as_ref()
+            .expect("env required when pathPrefix set");
+        assert!(
+            env.iter()
+                .any(|e| e.name == "PATH_PREFIX" && e.value.as_deref() == Some("team-a")),
+            "PATH_PREFIX env should equal team-a; got {env:?}",
+        );
+    }
+
+    #[test]
+    fn path_prefix_strips_leading_slash() {
+        let job = build_scan_job(
+            &valid_pvc_spec("sbom-scratch", Some("/team-a")),
+            "scan-prod",
+            "nginx:1.27.0",
+        )
+        .unwrap();
+        let upload = &pod_spec(&job).containers[0];
+        let env = upload.env.as_ref().unwrap();
+        assert!(
+            env.iter()
+                .any(|e| e.name == "PATH_PREFIX" && e.value.as_deref() == Some("team-a")),
+            "leading-slash strip should produce team-a; got {env:?}",
+        );
+    }
+
+    #[test]
+    fn missing_pvc_config_errors_when_pvc_none() {
+        let mut spec = valid_spec();
+        spec.output.backend_type = OutputType::Pvc;
+        spec.output.pvc = None;
+        let err = build_scan_job(&spec, "scan-prod", "nginx:1.27.0").unwrap_err();
+        assert_eq!(err, BuildScanJobError::MissingPvcConfig);
+    }
+
+    #[test]
+    fn missing_pvc_config_errors_when_claim_empty() {
+        let err1 =
+            build_scan_job(&valid_pvc_spec("", None), "scan-prod", "nginx:1.27.0").unwrap_err();
+        assert_eq!(err1, BuildScanJobError::MissingPvcConfig);
+        let err2 =
+            build_scan_job(&valid_pvc_spec("   ", None), "scan-prod", "nginx:1.27.0").unwrap_err();
+        assert_eq!(err2, BuildScanJobError::MissingPvcConfig);
     }
 }
