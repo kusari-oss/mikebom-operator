@@ -108,6 +108,12 @@ pub struct OciOutput {
 pub struct NamespaceScanStatus {
     #[serde(default)]
     pub conditions: Vec<StatusCondition>,
+    /// Wallclock of the most recent reconcile attempt. Refreshed every reconcile
+    /// cycle even when no status transition occurred. Distinct from
+    /// `last_scan_completed_at`, which is reserved for actual scan completion
+    /// in feature 003+.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub last_reconciled_at: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub last_scan_completed_at: Option<String>,
     #[serde(default)]

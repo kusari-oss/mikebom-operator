@@ -51,6 +51,53 @@ crates/operator/src/crds/serialize.rs        (crd_yaml::<K>())
 No hand-edited intermediate. CI fails any PR where the chart YAML drifts
 from what the generator emits.
 
+## Reconciler
+
+### Lifecycle
+
+```text
+main.rs
+  ├─ tracing-subscriber.json() — structured JSON log writer
+  ├─ Client::try_default()
+  ├─ leader::run_with_leadership(client, LeaderConfig{namespace, name, identity}, body)
+  │    ├─ acquire `coordination.k8s.io.Lease` (15s duration; ~5s renewal)
+  │    └─ on renewal failure → process exits non-zero (k8s restarts pod)
+  └─ body = Controller::new(Api::<NamespaceScan>::all(client)).run(reconcile, error_policy, ctx)
+        └─ on every watch event + every 5 minutes (periodic resync):
+             status::desired_status(spec, now, existing) → patch /status
+```
+
+### Status condition vocabulary
+
+The reconciler writes exactly one `condition` per CR with `type=Ready`. Possible
+values written in feature 002 (this milestone):
+
+| `status` | `reason`           | When                                                       |
+|----------|--------------------|------------------------------------------------------------|
+| `False`  | `NotYetReconciled` | Spec target is valid; scanning is not yet implemented.     |
+| `False`  | `InvalidSpec`      | `spec.target` has empty `namespaces` and unset/empty `labelSelector`. |
+
+Reasons reserved for future features (do not repurpose):
+
+- `Scanning` — feature 003 (Job pod template).
+- `ScanFailed`, `ScanCompleted` (with `status=True`) — feature 003.
+- `RBACInsufficient` — feature 003+ (per constitution principle III).
+
+### Requeue cadence
+
+Watch-driven reconciles fire on every CR add/update/delete event. A periodic
+`Action::requeue(Duration::from_secs(300))` (5 minutes) acts as a heartbeat —
+even idle CRs refresh `lastReconciledAt` at most every 5 minutes so cluster
+admins can verify the operator is still alive without a metrics endpoint.
+
+### Idempotency
+
+`status::desired_status` is a pure function of `(spec, now, existing_status)`.
+Reconciling an unchanged spec produces an identical condition (only
+`lastReconciledAt` advances; the condition's `lastTransitionTime` is preserved).
+This is enforced by unit tests in `crates/operator/src/status.rs` that run on
+every `cargo test --workspace`.
+
 ## Security model
 
 - The operator runs with a tightly-scoped `ClusterRole`: read pods,

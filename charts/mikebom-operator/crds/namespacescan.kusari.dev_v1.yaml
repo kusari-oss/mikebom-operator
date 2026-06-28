@@ -134,6 +134,10 @@ spec:
                   - type
                   type: object
                 type: array
+              lastReconciledAt:
+                description: Wallclock of the most recent reconcile attempt. Refreshed every reconcile cycle even when no status transition occurred. Distinct from `last_scan_completed_at`, which is reserved for actual scan completion in feature 003+.
+                nullable: true
+                type: string
               lastScanCompletedAt:
                 nullable: true
                 type: string

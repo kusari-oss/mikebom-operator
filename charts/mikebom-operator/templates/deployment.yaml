@@ -22,6 +22,14 @@ spec:
           env:
             - name: RUST_LOG
               value: info
+            - name: POD_NAME
+              valueFrom:
+                fieldRef:
+                  fieldPath: metadata.name
+            - name: POD_NAMESPACE
+              valueFrom:
+                fieldRef:
+                  fieldPath: metadata.namespace
             - name: MIKEBOM_DEFAULT_IMAGE
               value: {{ .Values.mikebom.image | quote }}
             - name: MIKEBOM_DEFAULT_SCAN_FORMAT

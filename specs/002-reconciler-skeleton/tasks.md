@@ -25,9 +25,9 @@ description: "Task list for feature 002-reconciler-skeleton"
 
 **Purpose**: Workspace deps + chart Deployment env-vars + RBAC pre-flight.
 
-- [ ] T001 [P] Add `"json"` to `tracing-subscriber` features in workspace `Cargo.toml` so the operator binary can initialize structured JSON logs per FR-009 / SC-005 (resulting line: `tracing-subscriber = { version = "0.3", features = ["env-filter", "json"] }`)
-- [ ] T002 [P] Add Downward-API env vars to `charts/mikebom-operator/templates/deployment.yaml`: `POD_NAME` from `metadata.name` and `POD_NAMESPACE` from `metadata.namespace`. The operator binary reads these to derive `holderIdentity` and the Lease's namespace per contracts/leader-election.md.
-- [ ] T003 Verify `charts/mikebom-operator/templates/rbac.yaml` already grants the verbs the reconciler skeleton needs (per research §R7): `kusari.dev` `namespacescans` + `namespacescans/status` (get/list/watch/update/patch), `coordination.k8s.io` `leases` (get/list/watch/create/update/patch/delete), `""` `events` (create/patch). If anything is missing, add it.
+- [x] T001 [P] Added `"json"` to `tracing-subscriber` workspace features
+- [x] T002 [P] Added `POD_NAME` + `POD_NAMESPACE` Downward-API env vars to `charts/mikebom-operator/templates/deployment.yaml`
+- [x] T003 RBAC pre-flight: chart `rbac.yaml` already includes namespacescans/status, leases (full verbs), events — no changes needed
 
 ---
 
@@ -37,14 +37,14 @@ description: "Task list for feature 002-reconciler-skeleton"
 
 **⚠️ CRITICAL**: No user-story phase can start until this phase is complete.
 
-- [ ] T004 Add `pub last_reconciled_at: Option<String>` to `NamespaceScanStatus` in `crates/operator/src/crds/namespace_scan.rs` (positioned before `last_scan_completed_at` to keep the natural lifecycle order). Update the doc-comment per data-model §1.
-- [ ] T005 Regenerate the chart's CRD YAML: `cargo run --bin mikebom-operator-ctl -- crd --output charts/mikebom-operator/crds/namespacescan.kusari.dev_v1.yaml` (depends on T004 — without T004 the regen would output the old shape).
-- [ ] T006 Run `cargo test --test crd_drift` and confirm both `chart_crd_yaml_matches_generator` and `generator_is_deterministic` pass against the new YAML.
-- [ ] T007 Implement `crates/operator/src/leader.rs` exposing `pub async fn run_with_leadership<F, Fut>(client: kube::Client, lease_namespace: String, lease_name: String, identity: String, body: F) -> anyhow::Result<()>` that acquires a `coordination.k8s.io/v1.Lease` (15s duration, ~5s renewal per contracts/leader-election.md) and only runs `body()` while leader. Per research §R1 — verify the exact kube-rs 0.97 surface at impl time.
-- [ ] T008 Implement `crates/operator/src/status.rs` with `pub fn desired_status(spec: &NamespaceScanSpec, now: chrono::DateTime<chrono::Utc>, existing: Option<&NamespaceScanStatus>) -> NamespaceScanStatus`. Include `#[cfg(test)] mod tests` covering: (a) valid spec → single `Ready=False, reason=NotYetReconciled` condition + `lastReconciledAt` populated; (b) empty target → `reason=InvalidSpec`; (c) idempotency: calling twice with identical inputs produces conditions whose `lastTransitionTime` is the same as the existing one (only `lastReconciledAt` advances); (d) transition: when reason changes, `lastTransitionTime` updates. Satisfies FR-010, FR-011.
-- [ ] T009 Implement `crates/operator/src/reconcile/namespace_scan.rs` with the `reconcile(obj: Arc<NamespaceScan>, ctx: Arc<Ctx>) -> Result<Action, Error>` + `error_policy(_: Arc<NamespaceScan>, err: &Error, _: Arc<Ctx>) -> Action` functions and the `Ctx` + `Error` types. Reconcile calls `status::desired_status`, applies a `Patch::Merge` against the `/status` subresource via `Api::patch_status`, and returns `Action::requeue(Duration::from_secs(300))` per research §R3 + §R4.
-- [ ] T010 Wire `crates/operator/src/main.rs`: initialize `tracing_subscriber::fmt().json().with_env_filter(...)`; emit a `tracing::info!(event = "startup", ...)` line; `kube::Client::try_default().await?`; read `POD_NAMESPACE` + `POD_NAME` env vars; call `leader::run_with_leadership(...)` wrapping `Controller::new(Api::<NamespaceScan>::all(client), watcher::Config::default()).run(reconcile::namespace_scan::reconcile, reconcile::namespace_scan::error_policy, Arc::new(Ctx { ... })).for_each(|_| async {}).await`.
-- [ ] T011 Run `cargo fmt --all && cargo clippy --workspace --all-targets -- -D warnings && cargo test --workspace` and resolve anything that fires before moving to user-story phases.
+- [x] T004 Added `lastReconciledAt: Option<String>` to `NamespaceScanStatus` with explanatory doc-comment
+- [x] T005 Regenerated chart CRD YAML; new field appears with `nullable: true` + doc-string
+- [x] T006 `cargo test --test crd_drift` passes (2/2)
+- [x] T007 Implemented `crates/operator/src/leader.rs` — hand-rolled Lease acquisition + 5s renewer + process exit on renewal failure (per research R1's fallback option B since kube-rs 0.97 has no helper we wanted to inherit)
+- [x] T008 Implemented `crates/operator/src/status.rs::desired_status` + 6 unit tests covering valid/InvalidSpec/idempotency/transition/preservation/whitespace-labelSelector
+- [x] T009 Implemented `crates/operator/src/reconcile/namespace_scan.rs::{reconcile, error_policy, Ctx, ReconcileError}` — patches `/status` via `Patch::Merge`, requeues at 5min, 404 in error_policy → `Action::await_change()`
+- [x] T010 Wired `crates/operator/src/main.rs` — JSON tracing init, Downward-API env reads, `run_with_leadership` wrapping `Controller::new(...).run(...)` stream
+- [x] T011 `cargo fmt && cargo clippy -D warnings && cargo test --workspace` all green
 
 **Checkpoint**: CRD shape updated + chart in sync; reconciler library compiles + unit tests pass; main.rs ready to deploy.
 
@@ -58,7 +58,7 @@ description: "Task list for feature 002-reconciler-skeleton"
 
 ### Implementation for User Story 1
 
-- [ ] T012 [US1] Create `e2e/tests/reconciler_skeleton.rs` with a `helm_install_makes_operator_ready` test, gated by `MIKEBOM_OPERATOR_E2E=1`. The test: (a) cleans up prior installs/namespace best-effort; (b) runs `helm install mikebom-operator charts/mikebom-operator -n kusari-operator --create-namespace --kube-context kind-mikebom-operator-e2e --wait --timeout 30s`; (c) asserts install succeeded; (d) `kubectl logs deployment/mikebom-operator -n kusari-operator` returns structured JSON records and at least one carries `event=startup` and at least one carries `event=leader_acquired`. Satisfies FR-001, FR-002, FR-009, SC-001.
+- [x] T012 [US1] Created `e2e/tests/reconciler_skeleton.rs::reconciler_skeleton_full_flow` (consolidates US1+US2+US3-observability into one helm-install cycle for E2E performance). Asserts pod Ready < 60s + structured log records `event=startup` and `event=leader_acquired` (FR-001, FR-002, FR-009, SC-001)
 
 **Checkpoint**: Operator installs and runs in-cluster. No reconcile work happens yet (no CRs applied) — that's US2.
 
@@ -74,9 +74,9 @@ description: "Task list for feature 002-reconciler-skeleton"
 
 ### Implementation for User Story 2
 
-- [ ] T013 [US2] Extend `e2e/tests/reconciler_skeleton.rs` with a `reconciler_acknowledges_valid_cr` test that (after US1's install) applies `examples/namespacescan.yaml`, polls `kubectl get namespacescan scan-prod -o jsonpath=...` until `.status.conditions[?(@.type=="Ready")].reason` equals `NotYetReconciled` (timeout 10s), and asserts `.status.lastReconciledAt` is a non-empty RFC 3339 string. Satisfies FR-003, FR-004, SC-002.
-- [ ] T014 [US2] Extend `e2e/tests/reconciler_skeleton.rs` with a `reconciler_flags_invalid_spec` test that applies a `NamespaceScan` CR with `spec.target.namespaces: []` and `spec.target.labelSelector` unset, and polls for `.status.conditions[?(@.type=="Ready")].reason == "InvalidSpec"` within 10s. Satisfies FR-011.
-- [ ] T015 [US2] Extend `e2e/tests/reconciler_skeleton.rs` with a `reconciler_handles_cr_deletion` test that deletes the CR applied in T013 and asserts no JSON log records with `level=ERROR` appear in the operator's logs during the 30s following deletion. Satisfies FR-012.
+- [x] T013 [US2] Folded into `reconciler_skeleton_full_flow`: applies valid CR, polls for `Ready/NotYetReconciled` < 10s, asserts `lastReconciledAt` non-empty (FR-003, FR-004, SC-002)
+- [x] T014 [US2] Folded into same test: applies invalid CR (empty target.namespaces + unset labelSelector), polls for `Ready/InvalidSpec` < 10s (FR-011)
+- [x] T015 [US2] Folded into same test: deletes both CRs, asserts no `"level":"ERROR"` records appear in subsequent operator logs (FR-012)
 
 **Checkpoint**: Reconciler is observably alive — CRs get acknowledged, invalid specs are flagged, deletions are clean. The MVP-plus-enforcement state.
 
@@ -92,8 +92,8 @@ description: "Task list for feature 002-reconciler-skeleton"
 
 ### Implementation for User Story 3
 
-- [ ] T016 [P] [US3] Extend `e2e/tests/reconciler_skeleton.rs` with a `leader_election_lease_visible` test that asserts a `coordination.k8s.io/v1.Lease` named `mikebom-operator-leader` exists in `kusari-operator` namespace and its `.spec.holderIdentity` is non-empty and starts with `mikebom-operator-` (matching the format from contracts/leader-election.md). Satisfies FR-007.
-- [ ] T017 [P] [US3] Add `e2e/tests/reconciler_failover.rs` (separate file from `reconciler_skeleton.rs`) gated by `MIKEBOM_OPERATOR_E2E_FAILOVER=1` (NOT the same as `MIKEBOM_OPERATOR_E2E`) with a `failover_within_30s` test that: (a) scales the operator Deployment to `replicas: 2` via `kubectl scale`; (b) waits for the Lease `holderIdentity` to settle on one of the two pods; (c) `kubectl delete pod <leader>`; (d) polls the Lease for a new `holderIdentity` distinct from the killed pod within 30s; (e) polls an existing CR's `status.lastReconciledAt` to confirm reconcile resumes within a further 30s. Satisfies FR-008, SC-003. Gated separately because pod-kill is slow and flakier than the steady-state E2E.
+- [x] T016 [P] [US3] Folded into `reconciler_skeleton_full_flow`: asserts the Lease's `.spec.holderIdentity` starts with `mikebom-operator-` (FR-007)
+- [x] T017 [P] [US3] Created `e2e/tests/reconciler_failover.rs::failover_within_30s`, gated by `MIKEBOM_OPERATOR_E2E_FAILOVER=1` (opt-in). Installs with 2 replicas, kills the current leader, polls for new `holderIdentity` < 30s + CR's `lastReconciledAt` refresh < 30s further (FR-008, SC-003)
 
 **Checkpoint**: Multi-replica HA is exercised. v0.1 reconciler skeleton is complete.
 
@@ -103,10 +103,10 @@ description: "Task list for feature 002-reconciler-skeleton"
 
 **Purpose**: Documentation updates + the pre-PR gate.
 
-- [ ] T018 [P] Add a "Reconciler" subsection to `docs/architecture.md` covering: the condition vocabulary (NotYetReconciled, InvalidSpec, plus the reasons reserved for features 003+ per contracts/namespacescan-status.md), the requeue cadence (5 min watch-driven + periodic), and a pointer to `docs/crd-reference.md` for status field semantics.
-- [ ] T019 [P] Update `docs/crd-reference.md` to document the new `status.lastReconciledAt` field (RFC 3339; updates every reconcile; distinct from `lastScanCompletedAt`) and the v0.1 condition reasons.
-- [ ] T020 Run the per-PR pre-PR gate: `cargo fmt --all -- --check && cargo clippy --workspace --all-targets -- -D warnings && cargo test --workspace && helm lint charts/mikebom-operator/` (the constitution §"Development Workflow" gate). The kind E2Es are skipped unless `MIKEBOM_OPERATOR_E2E=1` is exported.
-- [ ] T021 Grep `NEEDS CLARIFICATION` across `specs/002-reconciler-skeleton/`, `crates/`, `e2e/`, and `docs/` to confirm zero leftover markers in source or spec artifacts.
+- [x] T018 [P] Added "Reconciler" subsection to `docs/architecture.md` with lifecycle diagram, condition vocabulary table, requeue cadence, and idempotency note
+- [x] T019 [P] Updated `docs/crd-reference.md` Status table with `lastReconciledAt` row + condition reasons table (current + reserved for 003+)
+- [x] T020 Pre-PR gate: `cargo fmt --all` (applied auto-fmt), `cargo clippy -D warnings` (clean), `cargo test --workspace` (11/11 tests pass: 6 status unit, 2 drift, 3 e2e gated skips). `helm lint` not runnable locally — CI runs via `azure/setup-helm@v4` (SHA-pinned)
+- [x] T021 NEEDS CLARIFICATION grep clean across `specs/002-reconciler-skeleton/`, `crates/`, `e2e/`, `docs/`
 
 ---
 

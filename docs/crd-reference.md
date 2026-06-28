@@ -40,6 +40,25 @@ verbatim.
 
 | Field | Type | Notes |
 |---|---|---|
-| `conditions[]` | k8s-style condition objects | `type=Ready` when last scan completed cleanly |
-| `lastScanCompletedAt` | RFC 3339 string | wallclock of last successful run |
-| `scannedImages[]` | list | per-image record: `imageRef`, `resolvedSha`, `sbomLocation`, `completedAt` |
+| `conditions[]` | k8s-style condition objects | exactly one `type=Ready` entry; see condition reasons below |
+| `lastReconciledAt` | RFC 3339 string | wallclock of the most recent reconcile attempt; refreshed every reconcile cycle (added in feature 002) |
+| `lastScanCompletedAt` | RFC 3339 string | wallclock of the most recent SUCCESSFUL scan completion (feature 003+) |
+| `scannedImages[]` | list | per-image record: `imageRef`, `resolvedSha`, `sbomLocation`, `completedAt` (populated by feature 003+) |
+
+### Condition reasons (`status.conditions[type=Ready].reason`)
+
+Values the operator writes in v0.1 (after feature 002):
+
+| `reason`           | `status` | Meaning |
+|--------------------|----------|---------|
+| `NotYetReconciled` | `False`  | Valid spec; scanning not yet implemented (steady state in v0.1). |
+| `InvalidSpec`      | `False`  | `spec.target` has neither namespaces nor a labelSelector. |
+
+Reserved for future features (do not repurpose):
+
+| `reason`            | Introduced in |
+|---------------------|---------------|
+| `Scanning`          | feature 003 (Job pod template) |
+| `ScanFailed`        | feature 003 |
+| `ScanCompleted`     | feature 003 (with `status=True`) |
+| `RBACInsufficient`  | feature 003+ (per constitution principle III) |
