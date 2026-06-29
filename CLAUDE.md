@@ -1,3 +1,3 @@
 <!-- SPECKIT START -->
-Active plan: [specs/009-schedule-honoring/plan.md](specs/009-schedule-honoring/plan.md)
+Active plan: [specs/010-release-pipeline/plan.md](specs/010-release-pipeline/plan.md)
 <!-- SPECKIT END -->

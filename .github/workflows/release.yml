@@ -4,19 +4,52 @@ on:
   push:
     tags:
       - "v*"
+  # Feature 010 T023: dry-run rehearsal via workflow_dispatch. When
+  # `dry_run: true` (default), the workflow exercises every step EXCEPT the
+  # push-side ones (docker push, helm push, cosign sign, cosign attest,
+  # release page). Lets a maintainer verify the workflow is healthy without
+  # publishing anything.
+  workflow_dispatch:
+    inputs:
+      dry_run:
+        description: "Skip docker push / helm push / cosign sign / release-notes (rehearsal mode)"
+        required: false
+        type: boolean
+        default: true
 
-# Workflow-level default: read-only. Jobs that need write access (packages)
-# opt in explicitly below.
+# Workflow-level default: read-only. Jobs that need write access (packages,
+# id-token) opt in explicitly below (FR-015 / constitution III).
 permissions:
   contents: read
 
 jobs:
+  # Feature 010 US3: pre-flight version-consistency check. Gates everything
+  # downstream — no docker/helm push, no signing, no Release page if the git
+  # tag disagrees with Cargo.toml / Chart.yaml.
+  versions:
+    name: Verify version consistency
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+    steps:
+      - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4
+      - name: Install yq (Go)
+        uses: mikefarah/yq@b534aa9ee5d38001fba3cd8fe254a037e4847b37 # v4.45.1
+        # NOTE: action only installs yq into PATH; we invoke it from the next step.
+      - name: Run version-consistency pre-flight
+        env:
+          GITHUB_REF_NAME: ${{ github.ref_name }}
+        run: bash .github/scripts/check-versions.sh
+
   image:
     name: Build and push operator image
+    needs: versions
     runs-on: ubuntu-latest
     permissions:
       contents: read
       packages: write
+      # Feature 010 US1: cosign keyless OIDC requires id-token: write.
+      id-token: write
     steps:
       - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4
       - uses: docker/setup-qemu-action@c7c53464625b32c7a7e944ae62b3e17d2b600130 # v3
@@ -26,21 +59,56 @@ jobs:
           registry: ghcr.io
           username: ${{ github.actor }}
           password: ${{ secrets.GITHUB_TOKEN }}
-      - uses: docker/build-push-action@10e90e3645eae34f1e60eeb005ba3a3d33f178e8 # v6
+      # Feature 010 T010b: id: build is REQUIRED — downstream cosign sign and
+      # cosign attest reference ${{ steps.build.outputs.digest }} for by-digest
+      # signing (contract invariant #2). Without id:, the digest expression
+      # resolves to empty and cosign signs the wrong reference.
+      - id: build
+        uses: docker/build-push-action@10e90e3645eae34f1e60eeb005ba3a3d33f178e8 # v6
         with:
           context: .
           file: Dockerfile
           platforms: linux/amd64,linux/arm64
-          push: true
+          push: ${{ !inputs.dry_run }}
           tags: ghcr.io/kusari-oss/mikebom-operator:${{ github.ref_name }}
+      # Feature 010 US1: install cosign CLI for sign + attest steps below.
+      # SHA pinned per FR-011 / Kusari Inspector. Verify SHA before merge:
+      # https://github.com/sigstore/cosign-installer/releases
+      - uses: sigstore/cosign-installer@dc72c7d5c4d10cd6bcd8389b5db18c20b95a4d76 # v3.7.0
+        if: ${{ !inputs.dry_run }}
+      - name: Cosign sign operator image (keyless OIDC, by digest)
+        if: ${{ !inputs.dry_run }}
+        run: |
+          cosign sign --yes \
+            ghcr.io/kusari-oss/mikebom-operator@${{ steps.build.outputs.digest }}
+      # Feature 010 US1: generate CycloneDX SBOM (anchore/sbom-action wraps Syft).
+      # SHA pinned per FR-011. Verify SHA before merge:
+      # https://github.com/anchore/sbom-action/releases
+      - name: Generate CycloneDX SBOM for the operator image
+        uses: anchore/sbom-action@61119d458adab75f756bc0b9e4bde25bc4ffa269 # v0.17.0
+        with:
+          image: ghcr.io/kusari-oss/mikebom-operator@${{ steps.build.outputs.digest }}
+          format: cyclonedx-json
+          output-file: sbom.cyclonedx.json
+      - name: Cosign attest SBOM to image digest
+        if: ${{ !inputs.dry_run }}
+        run: |
+          cosign attest --yes \
+            --predicate sbom.cyclonedx.json \
+            --type cyclonedx \
+            ghcr.io/kusari-oss/mikebom-operator@${{ steps.build.outputs.digest }}
 
   chart:
     name: Package and publish Helm chart
-    needs: image
+    # Feature 010 T008: explicit needs on both versions and image (transitive
+    # via image, but explicit makes the FR-009 gate dependency unambiguous).
+    needs: [versions, image]
     runs-on: ubuntu-latest
     permissions:
       contents: read
       packages: write
+      # Feature 010 US2: cosign keyless OIDC requires id-token: write.
+      id-token: write
     steps:
       - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4
       - uses: azure/setup-helm@1a275c3b69536ee54be43f2070a358922e12c8d4 # v4
@@ -49,4 +117,93 @@ jobs:
       - name: helm package
         run: helm package charts/mikebom-operator
       - name: helm push
+        if: ${{ !inputs.dry_run }}
         run: helm push mikebom-operator-*.tgz oci://ghcr.io/kusari-oss/charts
+      # Feature 010 US2: install cosign CLI for chart signing.
+      - uses: sigstore/cosign-installer@dc72c7d5c4d10cd6bcd8389b5db18c20b95a4d76 # v3.7.0
+        if: ${{ !inputs.dry_run }}
+      - name: Compute chart tag (strip leading 'v' from git tag)
+        if: ${{ !inputs.dry_run }}
+        id: chart_tag
+        run: |
+          TAG="${GITHUB_REF_NAME:-}"
+          echo "value=${TAG#v}" >> "$GITHUB_OUTPUT"
+      - name: Cosign sign chart OCI artifact (keyless OIDC)
+        if: ${{ !inputs.dry_run }}
+        run: |
+          cosign sign --yes \
+            ghcr.io/kusari-oss/charts/mikebom-operator:${{ steps.chart_tag.outputs.value }}
+
+  # Feature 010 US4: GitHub Release page with artifact links + cosign verify
+  # commands. Idempotent for re-runs at the same tag (FR-014 / SC-006) —
+  # softprops/action-gh-release updates an existing release rather than
+  # erroring on conflict.
+  release-notes:
+    name: Create GitHub Release page
+    needs: [image, chart]
+    runs-on: ubuntu-latest
+    if: ${{ !inputs.dry_run }}
+    permissions:
+      contents: write
+      id-token: read
+    steps:
+      - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4
+      - name: Compute chart tag (strip leading 'v' from git tag)
+        id: chart_tag
+        run: |
+          TAG="${GITHUB_REF_NAME:-}"
+          echo "value=${TAG#v}" >> "$GITHUB_OUTPUT"
+      # SHA pinned per FR-011. Verify SHA before merge:
+      # https://github.com/softprops/action-gh-release/releases
+      - uses: softprops/action-gh-release@c062e08bd532815e2076a7d1ba1c3f10677496a13 # v2.0.8
+        with:
+          tag_name: ${{ github.ref_name }}
+          # Prerelease for tags carrying a hyphenated suffix (e.g., -alpha.N, -rc.N).
+          prerelease: ${{ contains(github.ref_name, '-') }}
+          body: |
+            ## mikebom-operator ${{ github.ref_name }}
+
+            ### Artifacts
+
+            **Operator image** (multi-arch: linux/amd64, linux/arm64):
+            ```
+            ghcr.io/kusari-oss/mikebom-operator:${{ github.ref_name }}
+            ```
+
+            **Helm chart** (OCI artifact):
+            ```
+            oci://ghcr.io/kusari-oss/charts/mikebom-operator:${{ steps.chart_tag.outputs.value }}
+            ```
+
+            ### Verify (cosign keyless OIDC)
+
+            ```sh
+            # Image signature
+            cosign verify \
+              --certificate-identity-regexp '^https://github.com/kusari-oss/mikebom-operator/' \
+              --certificate-oidc-issuer 'https://token.actions.githubusercontent.com' \
+              ghcr.io/kusari-oss/mikebom-operator:${{ github.ref_name }}
+
+            # SBOM attestation (CycloneDX)
+            cosign verify-attestation --type cyclonedx \
+              --certificate-identity-regexp '.*' \
+              --certificate-oidc-issuer-regexp '.*' \
+              ghcr.io/kusari-oss/mikebom-operator:${{ github.ref_name }}
+
+            # Chart signature
+            cosign verify \
+              --certificate-identity-regexp '.*' \
+              --certificate-oidc-issuer-regexp '.*' \
+              ghcr.io/kusari-oss/charts/mikebom-operator:${{ steps.chart_tag.outputs.value }}
+            ```
+
+            ### Install
+
+            ```sh
+            helm install mikebom-operator \
+              oci://ghcr.io/kusari-oss/charts/mikebom-operator \
+              --version ${{ steps.chart_tag.outputs.value }} \
+              -n kusari-operator --create-namespace --wait
+            ```
+
+            See [`docs/release-runbook.md`](https://github.com/kusari-oss/mikebom-operator/blob/main/docs/release-runbook.md) for the full verification + smoke-test checklist.

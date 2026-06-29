@@ -2,7 +2,7 @@ apiVersion: v2
 name: mikebom-operator
 description: Helm chart for the mikebom Kubernetes operator.
 type: application
-version: 0.1.0
+version: 0.1.0-alpha.1
 appVersion: "0.1.0-alpha.1"
 home: https://github.com/kusari-oss/mikebom-operator
 sources:
