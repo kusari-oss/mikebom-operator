@@ -207,14 +207,20 @@ pub fn build_scan_job(
 
 /// 7-char SHA-256 prefix of the image ref. Provides Job-name uniqueness without
 /// trying to DNS-1123-sanitize digest-pinned refs.
-fn short_image_hash(image_ref: &str) -> String {
+///
+/// Re-exported `pub(crate)` so feature 007's reconciler can compute the same
+/// Job name for its get-before-create idempotency check (FR-004).
+pub(crate) fn short_image_hash(image_ref: &str) -> String {
     let digest = Sha256::digest(image_ref.as_bytes());
     let hex: String = digest.iter().map(|b| format!("{b:02x}")).collect();
     hex.chars().take(7).collect()
 }
 
 /// `nsscan-<sanitized-cr-name>-<7-char-hash>`, capped at 63 chars.
-fn job_name(cr_name: &str, short_hash: &str) -> String {
+///
+/// Re-exported `pub(crate)` so feature 007's reconciler can compute the same
+/// Job name for its get-before-create idempotency check (FR-004).
+pub(crate) fn job_name(cr_name: &str, short_hash: &str) -> String {
     let sanitized = sanitize_dns1123(cr_name);
     // Reserve room for the static prefix "nsscan-" (7), the hyphen + hash (8), total 15.
     let max_sanitized_len = 63usize.saturating_sub(15);

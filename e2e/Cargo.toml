@@ -17,3 +17,11 @@ anyhow.workspace = true
 tokio.workspace = true
 operator = { path = "../crates/operator" }
 serde_yaml.workspace = true
+
+[dev-dependencies]
+# Feature 007: in-process integration test against kind needs direct kube +
+# k8s-openapi access to construct fixtures and call ensure_jobs.
+kube.workspace = true
+k8s-openapi.workspace = true
+serde_json = "1"
+chrono.workspace = true

@@ -1,3 +1,3 @@
 <!-- SPECKIT START -->
-Active plan: [specs/004-pvc-backend/plan.md](specs/004-pvc-backend/plan.md)
+Active plan: [specs/007-reconciler-spawns-job/plan.md](specs/007-reconciler-spawns-job/plan.md)
 <!-- SPECKIT END -->

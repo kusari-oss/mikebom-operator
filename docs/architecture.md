@@ -70,18 +70,21 @@ main.rs
 ### Status condition vocabulary
 
 The reconciler writes exactly one `condition` per CR with `type=Ready`. Possible
-values written in feature 002 (this milestone):
+values:
 
-| `status` | `reason`           | When                                                       |
-|----------|--------------------|------------------------------------------------------------|
-| `False`  | `NotYetReconciled` | Spec target is valid; scanning is not yet implemented.     |
-| `False`  | `InvalidSpec`      | `spec.target` has empty `namespaces` and unset/empty `labelSelector`. |
+| `status` | `reason`           | Feature | When                                                       |
+|----------|--------------------|---------|------------------------------------------------------------|
+| `False`  | `InvalidSpec`      | 002     | `spec.target` has empty `namespaces` and unset/empty `labelSelector`. |
+| `False`  | `NotYetReconciled` | 002     | Valid spec; orchestration not yet attempted (transient — only seen during the first reconcile cycle in v0.7+). |
+| `False`  | `Scanning`         | 007     | Orchestrator ensured ≥1 scan Job per distinct in-scope image (steady state for any CR with active workloads). |
+| `False`  | `NoImagesInScope`  | 007     | Valid spec, target resolved to zero pods in phase `Running`/`Pending`. |
+| `False`  | `BuildFailed`      | 007     | `scan_job::build_scan_job` rejected the CR's `output` block for at least one in-scope image (e.g., `output.type=Pvc` without `pvc.claimName`). |
+| `False`  | `RBACInsufficient` | 007     | Operator lacks `pods:list` in a target namespace, or `jobs:create` in its own namespace. Fail-closed across the CR per constitution III. |
 
 Reasons reserved for future features (do not repurpose):
 
-- `Scanning` — feature 003 (Job pod template).
-- `ScanFailed`, `ScanCompleted` (with `status=True`) — feature 003.
-- `RBACInsufficient` — feature 003+ (per constitution principle III).
+- `ScanCompleted` (with `status=True`) — feature 008 (Job-status feedback).
+- `ScanFailed` — feature 008.
 
 ### Requeue cadence
 

@@ -47,21 +47,23 @@ verbatim.
 
 ### Condition reasons (`status.conditions[type=Ready].reason`)
 
-Values the operator writes in v0.1 (after feature 002):
+Values the operator writes:
 
-| `reason`           | `status` | Meaning |
-|--------------------|----------|---------|
-| `NotYetReconciled` | `False`  | Valid spec; scanning not yet implemented (steady state in v0.1). |
-| `InvalidSpec`      | `False`  | `spec.target` has neither namespaces nor a labelSelector. |
+| `reason`           | `status` | Meaning | Introduced in |
+|--------------------|----------|---------|---------------|
+| `NotYetReconciled` | `False`  | Valid spec; the operator has not yet attempted to orchestrate scan Jobs (transient; only seen on the very first reconcile cycle once feature 007 is live). | feature 002 |
+| `InvalidSpec`      | `False`  | `spec.target` has neither `namespaces` nor a `labelSelector`. Fix the CR. | feature 002 |
+| `Scanning`         | `False`  | The operator has spawned (or finds preexisting) one scan `batch/v1.Job` per distinct in-scope container image. Steady state for any CR with active workloads. | feature 007 |
+| `NoImagesInScope`  | `False`  | Target namespaces resolved to zero pods in phase `Running` or `Pending`. Apply workloads to a target namespace, or wait for the next reconcile cycle. | feature 007 |
+| `BuildFailed`      | `False`  | `scan_job::build_scan_job` rejected the CR's `output` block for at least one image (e.g., `output.type=Pvc` without `pvc.claimName`). Message names the failing image. | feature 007 |
+| `RBACInsufficient` | `False`  | The operator's ServiceAccount lacks `pods:list` in a target namespace, or `jobs:create` in its own namespace. Fail-closed across the entire CR per constitution III. | feature 007 |
 
 Reserved for future features (do not repurpose):
 
 | `reason`            | Introduced in |
 |---------------------|---------------|
-| `Scanning`          | feature 003 (Job pod template) |
-| `ScanFailed`        | feature 003 |
-| `ScanCompleted`     | feature 003 (with `status=True`) |
-| `RBACInsufficient`  | feature 003+ (per constitution principle III) |
+| `ScanCompleted`     | feature 008 (with `status=True`) |
+| `ScanFailed`        | feature 008 |
 
 ## Output backends
 
