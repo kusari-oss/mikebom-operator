@@ -47,10 +47,21 @@ pub fn desired_status(
     now: DateTime<Utc>,
     existing: Option<&NamespaceScanStatus>,
 ) -> NamespaceScanStatus {
-    let (reason, message) = if is_target_valid(&spec.target) {
-        (REASON_NOT_YET_RECONCILED, MESSAGE_NOT_YET_RECONCILED)
+    // Validity check order: target first, then schedule. Feature 009 (FR-005)
+    // extends InvalidSpec to cover malformed schedules.
+    let (reason, message): (&str, String) = if !is_target_valid(&spec.target) {
+        (REASON_INVALID_SPEC, MESSAGE_INVALID_SPEC.to_string())
     } else {
-        (REASON_INVALID_SPEC, MESSAGE_INVALID_SPEC)
+        // Schedule validation (feature 009): both-set, neither-set, invalid
+        // cron, invalid interval, below-minimum interval all surface as
+        // InvalidSpec with a specific message.
+        match crate::reconcile::scheduler::parse_schedule(&spec.schedule) {
+            Ok(_) => (
+                REASON_NOT_YET_RECONCILED,
+                MESSAGE_NOT_YET_RECONCILED.to_string(),
+            ),
+            Err(e) => (REASON_INVALID_SPEC, format!("invalid spec.schedule: {e}")),
+        }
     };
 
     let last_transition_time = existing
@@ -79,6 +90,7 @@ pub fn desired_status(
         scanned_images: existing
             .map(|s| s.scanned_images.clone())
             .unwrap_or_default(),
+        next_scheduled_scan_at: existing.and_then(|s| s.next_scheduled_scan_at.clone()),
     }
 }
 
@@ -156,6 +168,7 @@ pub fn status_with_orchestration_result(
         last_reconciled_at: base.last_reconciled_at,
         last_scan_completed_at: base.last_scan_completed_at,
         scanned_images: base.scanned_images,
+        next_scheduled_scan_at: base.next_scheduled_scan_at,
     }
 }
 
@@ -255,6 +268,7 @@ pub fn status_with_aggregated_outcome(
         last_reconciled_at: base.last_reconciled_at,
         last_scan_completed_at: new_last_scan_completed_at,
         scanned_images: merged,
+        next_scheduled_scan_at: base.next_scheduled_scan_at,
     }
 }
 
@@ -590,6 +604,7 @@ mod tests {
             last_reconciled_at: Some("2026-06-28T14:22:00Z".to_string()),
             last_scan_completed_at: None,
             scanned_images: vec![],
+            next_scheduled_scan_at: None,
         }
     }
 
@@ -757,6 +772,81 @@ mod tests {
         assert_eq!(
             second.conditions[0].last_transition_time,
             Some(later.to_rfc3339()),
+        );
+    }
+
+    // -----------------------------------------------------------------------
+    // Feature 009 — desired_status now validates schedule (FR-005 / FR-003)
+    // -----------------------------------------------------------------------
+
+    #[test]
+    fn t023_invalid_cron_expression_yields_invalid_spec() {
+        let mut spec = valid_spec();
+        spec.schedule = Schedule {
+            cron: Some("every 6 hours".to_string()),
+            interval: None,
+        };
+        let status = desired_status(&spec, Utc::now(), None);
+        assert_eq!(
+            status.conditions[0].reason.as_deref(),
+            Some(REASON_INVALID_SPEC)
+        );
+        let msg = status.conditions[0].message.as_deref().unwrap_or("");
+        assert!(
+            msg.contains("invalid spec.schedule") && msg.contains("cron"),
+            "expected schedule error message naming cron, got: {msg}"
+        );
+    }
+
+    #[test]
+    fn t024_neither_schedule_field_set_yields_invalid_spec() {
+        let mut spec = valid_spec();
+        spec.schedule = Schedule {
+            cron: None,
+            interval: None,
+        };
+        let status = desired_status(&spec, Utc::now(), None);
+        assert_eq!(
+            status.conditions[0].reason.as_deref(),
+            Some(REASON_INVALID_SPEC)
+        );
+        let msg = status.conditions[0].message.as_deref().unwrap_or("");
+        assert!(
+            msg.contains("neither cron nor interval"),
+            "expected message naming the missing fields, got: {msg}"
+        );
+    }
+
+    #[test]
+    fn both_cron_and_interval_set_yields_invalid_spec() {
+        let mut spec = valid_spec();
+        spec.schedule = Schedule {
+            cron: Some("0 * * * *".to_string()),
+            interval: Some("1h".to_string()),
+        };
+        let status = desired_status(&spec, Utc::now(), None);
+        assert_eq!(
+            status.conditions[0].reason.as_deref(),
+            Some(REASON_INVALID_SPEC)
+        );
+        let msg = status.conditions[0].message.as_deref().unwrap_or("");
+        assert!(
+            msg.contains("both cron and interval"),
+            "expected message naming the conflict, got: {msg}"
+        );
+    }
+
+    #[test]
+    fn interval_below_minimum_yields_invalid_spec() {
+        let mut spec = valid_spec();
+        spec.schedule = Schedule {
+            cron: None,
+            interval: Some("30s".to_string()),
+        };
+        let status = desired_status(&spec, Utc::now(), None);
+        assert_eq!(
+            status.conditions[0].reason.as_deref(),
+            Some(REASON_INVALID_SPEC)
         );
     }
 }

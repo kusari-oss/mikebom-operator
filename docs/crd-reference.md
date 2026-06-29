@@ -44,6 +44,7 @@ verbatim.
 | `lastReconciledAt` | RFC 3339 string | wallclock of the most recent reconcile attempt; refreshed every reconcile cycle (added in feature 002) |
 | `lastScanCompletedAt` | RFC 3339 string | wallclock of the most recent SUCCESSFUL scan completion (feature 003+) |
 | `scannedImages[]` | list | per-image record: `imageRef`, `resolvedSha`, `sbomLocation`, `completedAt` (populated by feature 003+) |
+| `nextScheduledScanAt` | RFC 3339 string | wallclock of the next scheduled scan trigger (feature 009+; computed from `spec.schedule` + `lastScanCompletedAt` + deterministic per-CR jitter) |
 
 ### Condition reasons (`status.conditions[type=Ready].reason`)
 
@@ -61,6 +62,78 @@ Values the operator writes:
 | `ScanFailed`       | `False`  | At least one owned scan Job has `status.failed >= backoffLimit + 1` (default 7 failed pods). Failure dominates partial-success: if 1 Job failed and 2 succeeded, the reason is still `ScanFailed`. Message names a failing image so the admin knows where to look. | feature 008 |
 
 No reasons are currently reserved for future features.
+
+## Scheduling
+
+`spec.schedule` controls how often the operator re-scans (feature 009+). Exactly
+one of `cron` or `interval` MUST be set; both-set or neither-set surface as
+`Ready=False / reason=InvalidSpec`.
+
+### Cron recipes
+
+Standard 5-field cron expressions, interpreted in **UTC** (no per-CR timezone
+field in v0.9). Format: `minute hour day-of-month month day-of-week`.
+
+| Use case | Expression |
+|---|---|
+| Every 6 hours | `0 */6 * * *` |
+| Nightly at 02:00 UTC | `0 2 * * *` |
+| Hourly on the hour | `0 * * * *` |
+| Weekdays 9 AM – 5 PM hourly | `0 9-17 * * 1-5` |
+| Every minute (testing only) | `* * * * *` |
+
+### Interval recipes
+
+Go-style duration strings, measured from `status.lastScanCompletedAt`.
+**Minimum: 1 minute** — shorter intervals (e.g., `"500ms"`, `"30s"`) reject
+as `InvalidSpec`.
+
+| Use case | Expression |
+|---|---|
+| Every 6 hours | `6h` |
+| Every 30 minutes | `30m` |
+| Daily | `24h` |
+| Compound (1.5 hours) | `1h30m` |
+| Every minute (testing only) | `60s` or `1m` |
+
+### Schedule + status
+
+When the next scheduled instant has elapsed AND the CR is in a terminal scan
+state (`ScanCompleted` or `ScanFailed`), the operator:
+
+1. Deletes every owned Job whose `.status.succeeded >= 1` OR has exhausted
+   retries (`.status.failed > backoffLimit`). In-progress Jobs are never
+   deleted (FR-011).
+2. The next reconcile cycle invokes `ensure_jobs` (feature 007) which spawns
+   fresh Jobs idempotently for the in-scope image set.
+3. As Jobs complete, feature 008's aggregator transitions the CR back through
+   `Scanning → ScanCompleted`.
+4. `status.lastScanCompletedAt` advances; `status.nextScheduledScanAt` shifts
+   forward by one interval/cron tick.
+
+### Per-CR jitter
+
+The operator adds a deterministic 0–59-second offset (hashed from the CR's
+`metadata.uid`) to the computed next-fire time. This spreads cluster-wide
+herds at cron boundaries (100 CRs with `cron: "0 * * * *"` distribute their
+fires across a 60-second window instead of stampeding the apiserver).
+
+The offset is **stable across operator restarts** — the same CR always fires
+at the same offset.
+
+### Operator restart catch-up
+
+If the operator was down through multiple scheduled windows, exactly **one**
+catch-up scan fires on recovery (not N). The next-fire computation is
+anchor-relative, not iterative — `is_schedule_due` is a single boolean
+comparison, not a loop over missed windows.
+
+### Edits take effect immediately
+
+Editing `spec.schedule` (e.g., `interval: "1h"` → `"15m"`) is honored on the
+next reconcile. The new interval is measured against the existing
+`status.lastScanCompletedAt`. To force an immediate re-scan, edit the
+interval to a short value (≥ 1 minute), wait for it to fire, then edit back.
 
 ## Output backends
 

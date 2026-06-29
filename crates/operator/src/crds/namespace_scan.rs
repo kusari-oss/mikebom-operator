@@ -131,6 +131,13 @@ pub struct NamespaceScanStatus {
     pub last_scan_completed_at: Option<String>,
     #[serde(default)]
     pub scanned_images: Vec<ScannedImage>,
+    /// Feature 009: next scheduled scan instant (RFC 3339). Computed from
+    /// `spec.schedule` + `last_scan_completed_at` (anchor fallback:
+    /// `metadata.creationTimestamp`) + per-CR jitter. Populated on every
+    /// reconcile that produces a terminal scan state (ScanCompleted /
+    /// ScanFailed). Always in the future relative to the anchor.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub next_scheduled_scan_at: Option<String>,
 }
 
 #[derive(Deserialize, Serialize, Clone, Debug, JsonSchema)]

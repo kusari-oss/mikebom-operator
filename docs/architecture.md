@@ -92,6 +92,11 @@ Watch-driven reconciles fire on every CR add/update/delete event. A periodic
 even idle CRs refresh `lastReconciledAt` at most every 5 minutes so cluster
 admins can verify the operator is still alive without a metrics endpoint.
 
+Feature 009+ tightens the cadence when a schedule fire is imminent: if the
+next scheduled scan is within 1 minute, the requeue is shortened to fire
+just after the scheduled tick. Otherwise the 5-minute heartbeat is kept. See
+`status.nextScheduledScanAt` on the CR for the next-fire wallclock.
+
 ### Idempotency
 
 `status::desired_status` is a pure function of `(spec, now, existing_status)`.
