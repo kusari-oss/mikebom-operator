@@ -393,7 +393,11 @@ name = "e2e"
 version = "0.1.0"
 dependencies = [
  "anyhow",
+ "chrono",
+ "k8s-openapi",
+ "kube",
  "operator",
+ "serde_json",
  "serde_yaml",
  "tokio",
 ]

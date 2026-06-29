@@ -41,34 +41,41 @@ async fn main() -> Result<()> {
         .context("failed to create kube client (is the operator running outside a cluster?)")?;
 
     let leader_config = LeaderConfig {
-        namespace: pod_namespace,
+        namespace: pod_namespace.clone(),
         lease_name,
         identity: format!("mikebom-operator-{pod_name}"),
     };
 
-    run_with_leadership(client.clone(), leader_config, |client| async move {
-        let api: Api<NamespaceScan> = Api::all(client.clone());
-        let ctx = Arc::new(Ctx { client });
+    let operator_namespace = pod_namespace;
+    run_with_leadership(client.clone(), leader_config, move |client| {
+        let operator_namespace = operator_namespace.clone();
+        async move {
+            let api: Api<NamespaceScan> = Api::all(client.clone());
+            let ctx = Arc::new(Ctx {
+                client,
+                operator_namespace,
+            });
 
-        info!(
-            event = "controller_starting",
-            "spawning NamespaceScan controller"
-        );
+            info!(
+                event = "controller_starting",
+                "spawning NamespaceScan controller"
+            );
 
-        Controller::new(api, watcher::Config::default())
-            .run(reconcile, error_policy, ctx)
-            .for_each(|res| async move {
-                if let Err(e) = res {
-                    warn!(
-                        event = "controller_runtime_error",
-                        error = %format!("{e:#}"),
-                        "controller stream emitted an error",
-                    );
-                }
-            })
-            .await;
+            Controller::new(api, watcher::Config::default())
+                .run(reconcile, error_policy, ctx)
+                .for_each(|res| async move {
+                    if let Err(e) = res {
+                        warn!(
+                            event = "controller_runtime_error",
+                            error = %format!("{e:#}"),
+                            "controller stream emitted an error",
+                        );
+                    }
+                })
+                .await;
 
-        Ok(())
+            Ok(())
+        }
     })
     .await?;
 
