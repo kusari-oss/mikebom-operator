@@ -80,11 +80,10 @@ values:
 | `False`  | `NoImagesInScope`  | 007     | Valid spec, target resolved to zero pods in phase `Running`/`Pending`. |
 | `False`  | `BuildFailed`      | 007     | `scan_job::build_scan_job` rejected the CR's `output` block for at least one in-scope image (e.g., `output.type=Pvc` without `pvc.claimName`). |
 | `False`  | `RBACInsufficient` | 007     | Operator lacks `pods:list` in a target namespace, or `jobs:create` in its own namespace. Fail-closed across the CR per constitution III. |
+| `True`   | `ScanCompleted`    | 008     | All scan Jobs owned by this CR have `status.succeeded >= 1`. The CR's `status.scannedImages[]` is populated and `kubectl wait --for=condition=Ready` exits 0. |
+| `False`  | `ScanFailed`       | 008     | At least one scan Job has `status.failed >= backoffLimit + 1` (default 7 failed pods). Failure dominates partial-success in the aggregation. Message names the failing image. |
 
-Reasons reserved for future features (do not repurpose):
-
-- `ScanCompleted` (with `status=True`) — feature 008 (Job-status feedback).
-- `ScanFailed` — feature 008.
+No reasons are currently reserved for future features.
 
 ### Requeue cadence
 

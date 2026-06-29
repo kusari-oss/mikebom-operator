@@ -147,7 +147,7 @@ pub struct StatusCondition {
     pub last_transition_time: Option<String>,
 }
 
-#[derive(Deserialize, Serialize, Clone, Debug, JsonSchema)]
+#[derive(Deserialize, Serialize, Clone, Debug, PartialEq, Eq, JsonSchema)]
 #[serde(rename_all = "camelCase")]
 pub struct ScannedImage {
     pub image_ref: String,

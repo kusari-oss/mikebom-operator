@@ -27,8 +27,12 @@ use thiserror::Error;
 use tracing::{error, info};
 
 use crate::crds::namespace_scan::NamespaceScan;
-use crate::reconcile::scan_orchestrator::{ensure_jobs, CrMetaSnapshot};
-use crate::status::{desired_status, status_with_orchestration_result, REASON_INVALID_SPEC};
+use crate::reconcile::scan_orchestrator::{ensure_jobs, CrMetaSnapshot, OrchestrationResult};
+use crate::reconcile::status_aggregator::{aggregate_job_outcomes, list_owned_jobs};
+use crate::status::{
+    desired_status, status_with_aggregated_outcome, status_with_orchestration_result,
+    REASON_INVALID_SPEC,
+};
 
 const REQUEUE_INTERVAL: Duration = Duration::from_secs(300);
 const ERROR_REQUEUE: Duration = Duration::from_secs(60);
@@ -108,7 +112,33 @@ pub async fn reconcile(obj: Arc<NamespaceScan>, ctx: Arc<Ctx>) -> Result<Action,
                 result = ?orchestration,
                 "scan orchestration completed",
             );
-            status_with_orchestration_result(base_status, obj.status.as_ref(), &orchestration, now)
+            let after_feat_007 = status_with_orchestration_result(
+                base_status,
+                obj.status.as_ref(),
+                &orchestration,
+                now,
+            );
+            // Feature 008: aggregate owned Jobs and overlay ScanCompleted /
+            // ScanFailed onto the Scanning base. FR-009 gate: this branch ONLY
+            // runs when feature 007 returned Spawned; other variants
+            // (NoImagesInScope, BuildFailed, RbacInsufficient) keep feature
+            // 007's status verbatim.
+            if let OrchestrationResult::Spawned { .. } = &orchestration {
+                let jobs_api: Api<k8s_openapi::api::batch::v1::Job> =
+                    Api::namespaced(ctx.client.clone(), &ctx.operator_namespace);
+                let owned = list_owned_jobs(&jobs_api, &name).await?;
+                let outcome = aggregate_job_outcomes(&owned, &obj.spec);
+                info!(
+                    event = "scan_aggregation_result",
+                    namespace_scan = %name,
+                    job_count = owned.len(),
+                    outcome = ?outcome,
+                    "job-status aggregation completed",
+                );
+                status_with_aggregated_outcome(after_feat_007, obj.status.as_ref(), &outcome, now)
+            } else {
+                after_feat_007
+            }
         }
     };
 

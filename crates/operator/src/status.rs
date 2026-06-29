@@ -10,20 +10,22 @@
 use chrono::{DateTime, Utc};
 
 use crate::crds::namespace_scan::{
-    NamespaceScanSpec, NamespaceScanStatus, StatusCondition, Target,
+    NamespaceScanSpec, NamespaceScanStatus, ScannedImage, StatusCondition, Target,
 };
 
 pub const READY: &str = "Ready";
 pub const STATUS_FALSE: &str = "False";
+pub const STATUS_TRUE: &str = "True";
 pub const REASON_NOT_YET_RECONCILED: &str = "NotYetReconciled";
 pub const REASON_INVALID_SPEC: &str = "InvalidSpec";
 // Feature 007 reasons — written when the orchestrator runs against a valid spec.
-// All four are `Ready=False`; feature 008 will introduce the first `Ready=True`
-// transition via `ScanCompleted`.
 pub const REASON_SCANNING: &str = "Scanning";
 pub const REASON_NO_IMAGES_IN_SCOPE: &str = "NoImagesInScope";
 pub const REASON_RBAC_INSUFFICIENT: &str = "RBACInsufficient";
 pub const REASON_BUILD_FAILED: &str = "BuildFailed";
+// Feature 008 reasons — written when Job watch + aggregation produce a terminal scan outcome.
+pub const REASON_SCAN_COMPLETED: &str = "ScanCompleted";
+pub const REASON_SCAN_FAILED: &str = "ScanFailed";
 
 const MESSAGE_NOT_YET_RECONCILED: &str =
     "Scanning not yet implemented; mikebom-operator feature 003 introduces the Job spec.";
@@ -154,6 +156,105 @@ pub fn status_with_orchestration_result(
         last_reconciled_at: base.last_reconciled_at,
         last_scan_completed_at: base.last_scan_completed_at,
         scanned_images: base.scanned_images,
+    }
+}
+
+/// Apply the result of `status_aggregator::aggregate_job_outcomes` to a base
+/// status (already carrying feature 007's `Scanning` reason for the `Spawned`
+/// arm). Caller MUST only invoke this after feature 007 returned `Spawned`
+/// (FR-009).
+///
+/// Decision table (research.md §6/§8):
+/// - `AllSucceeded { scanned }` → `Ready=True, reason=ScanCompleted`;
+///   merge `scanned` into `status.scannedImages[]` append-only (FR-015);
+///   advance `lastScanCompletedAt` to `max(completedAt)`.
+/// - `AnyFailed { image_ref }` → `Ready=False, reason=ScanFailed`;
+///   `scannedImages[]` passes through unchanged.
+/// - `StillRunning` → preserve `base` (Scanning from feature 007).
+pub fn status_with_aggregated_outcome(
+    base: NamespaceScanStatus,
+    existing: Option<&NamespaceScanStatus>,
+    outcome: &crate::reconcile::status_aggregator::AggregatedOutcome,
+    now: DateTime<Utc>,
+) -> NamespaceScanStatus {
+    use crate::reconcile::status_aggregator::{
+        merge_scanned_images_append_only, AggregatedOutcome,
+    };
+
+    let (status_value, reason, message, scanned_to_merge): (&str, &str, String, Vec<ScannedImage>) =
+        match outcome {
+            AggregatedOutcome::AllSucceeded { scanned } => (
+                STATUS_TRUE,
+                REASON_SCAN_COMPLETED,
+                format!(
+                    "scanned {n} distinct image{plural} successfully",
+                    n = scanned.len(),
+                    plural = if scanned.len() == 1 { "" } else { "s" }
+                ),
+                scanned.clone(),
+            ),
+            AggregatedOutcome::AnyFailed { image_ref } => (
+                STATUS_FALSE,
+                REASON_SCAN_FAILED,
+                format!("scan failed for image \"{image_ref}\""),
+                Vec::new(),
+            ),
+            AggregatedOutcome::StillRunning => {
+                // Preserve feature 007's base status (Scanning) unchanged.
+                return base;
+            }
+        };
+
+    // Preserve lastTransitionTime when (status, reason) is unchanged on the
+    // prior `existing` condition; advance otherwise. Same rule as feat 002 /
+    // feat 007 mappers.
+    let last_transition_time = existing
+        .and_then(|s| s.conditions.iter().find(|c| c.condition_type == READY))
+        .and_then(|c| {
+            if c.status == status_value && c.reason.as_deref() == Some(reason) {
+                c.last_transition_time.clone()
+            } else {
+                None
+            }
+        })
+        .unwrap_or_else(|| now.to_rfc3339());
+
+    let condition = StatusCondition {
+        condition_type: READY.to_string(),
+        status: status_value.to_string(),
+        reason: Some(reason.to_string()),
+        message: Some(message),
+        last_transition_time: Some(last_transition_time),
+    };
+
+    // Merge scannedImages append-only + advance lastScanCompletedAt to
+    // max(existing, scanned_to_merge.completedAt). Only the AllSucceeded arm
+    // produces newly-completed entries; AnyFailed passes through unchanged.
+    let merged = if scanned_to_merge.is_empty() {
+        base.scanned_images.clone()
+    } else {
+        merge_scanned_images_append_only(&base.scanned_images, scanned_to_merge.clone())
+    };
+
+    let new_last_scan_completed_at = {
+        let mut acc = base.last_scan_completed_at.clone();
+        for s in &scanned_to_merge {
+            if acc
+                .as_deref()
+                .map(|cur| s.completed_at.as_str() > cur)
+                .unwrap_or(true)
+            {
+                acc = Some(s.completed_at.clone());
+            }
+        }
+        acc
+    };
+
+    NamespaceScanStatus {
+        conditions: vec![condition],
+        last_reconciled_at: base.last_reconciled_at,
+        last_scan_completed_at: new_last_scan_completed_at,
+        scanned_images: merged,
     }
 }
 
@@ -458,6 +559,204 @@ mod tests {
             second.conditions[0].last_transition_time,
             Some(later.to_rfc3339()),
             "lastTransitionTime must advance when reason changes (NoImagesInScope → Scanning)",
+        );
+    }
+
+    // -----------------------------------------------------------------------
+    // Feature 008 — status_with_aggregated_outcome
+    // -----------------------------------------------------------------------
+
+    use crate::reconcile::status_aggregator::AggregatedOutcome;
+
+    fn sample_scanned(image_ref: &str) -> ScannedImage {
+        ScannedImage {
+            image_ref: image_ref.to_string(),
+            resolved_sha: None,
+            sbom_location: format!("pvc://c/{image_ref}.json"),
+            completed_at: "2026-06-28T14:22:51Z".to_string(),
+        }
+    }
+
+    fn scanning_base() -> NamespaceScanStatus {
+        // What feature 007's mapper produces for a Spawned orchestration result.
+        NamespaceScanStatus {
+            conditions: vec![StatusCondition {
+                condition_type: READY.to_string(),
+                status: STATUS_FALSE.to_string(),
+                reason: Some(REASON_SCANNING.to_string()),
+                message: Some("scanning 2 distinct images".to_string()),
+                last_transition_time: Some("2026-06-28T14:22:00Z".to_string()),
+            }],
+            last_reconciled_at: Some("2026-06-28T14:22:00Z".to_string()),
+            last_scan_completed_at: None,
+            scanned_images: vec![],
+        }
+    }
+
+    #[test]
+    fn t010_all_succeeded_maps_to_scan_completed_ready_true() {
+        let now = Utc::now();
+        let outcome = AggregatedOutcome::AllSucceeded {
+            scanned: vec![
+                sample_scanned("nginx:1.27.0"),
+                sample_scanned("redis:7.4.0"),
+            ],
+        };
+        let out = status_with_aggregated_outcome(scanning_base(), None, &outcome, now);
+        let cond = &out.conditions[0];
+        assert_eq!(cond.status, STATUS_TRUE);
+        assert_eq!(cond.reason.as_deref(), Some(REASON_SCAN_COMPLETED));
+        let msg = cond.message.as_deref().unwrap_or("");
+        assert!(
+            msg.contains('2') && msg.contains("images"),
+            "message: {msg}"
+        );
+    }
+
+    #[test]
+    fn t010_all_succeeded_singular_message_for_one_image() {
+        let now = Utc::now();
+        let outcome = AggregatedOutcome::AllSucceeded {
+            scanned: vec![sample_scanned("nginx:1.27.0")],
+        };
+        let out = status_with_aggregated_outcome(scanning_base(), None, &outcome, now);
+        let msg = out.conditions[0].message.as_deref().unwrap_or("");
+        assert!(
+            msg.contains("1 distinct image ") || msg.ends_with("1 distinct image successfully"),
+            "singular wording expected, got: {msg}",
+        );
+    }
+
+    #[test]
+    fn t022_any_failed_maps_to_scan_failed_ready_false_with_image_in_message() {
+        let now = Utc::now();
+        let outcome = AggregatedOutcome::AnyFailed {
+            image_ref: "registry.invalid/never:v1".to_string(),
+        };
+        let out = status_with_aggregated_outcome(scanning_base(), None, &outcome, now);
+        let cond = &out.conditions[0];
+        assert_eq!(cond.status, STATUS_FALSE);
+        assert_eq!(cond.reason.as_deref(), Some(REASON_SCAN_FAILED));
+        let msg = cond.message.as_deref().unwrap_or("");
+        assert!(
+            msg.contains("registry.invalid/never:v1"),
+            "message MUST name failing image (FR-004): {msg}",
+        );
+    }
+
+    #[test]
+    fn t022_still_running_preserves_base_status() {
+        let now = Utc::now();
+        let base = scanning_base();
+        let out = status_with_aggregated_outcome(
+            base.clone(),
+            None,
+            &AggregatedOutcome::StillRunning,
+            now,
+        );
+        // StillRunning preserves base — same reason, same message, same lastTransitionTime.
+        assert_eq!(out.conditions[0].reason, base.conditions[0].reason);
+        assert_eq!(
+            out.conditions[0].last_transition_time,
+            base.conditions[0].last_transition_time,
+        );
+    }
+
+    #[test]
+    fn t029_all_succeeded_merges_into_scanned_images() {
+        let now = Utc::now();
+        let outcome = AggregatedOutcome::AllSucceeded {
+            scanned: vec![
+                sample_scanned("nginx:1.27.0"),
+                sample_scanned("redis:7.4.0"),
+            ],
+        };
+        let out = status_with_aggregated_outcome(scanning_base(), None, &outcome, now);
+        assert_eq!(out.scanned_images.len(), 2);
+        let refs: Vec<&str> = out
+            .scanned_images
+            .iter()
+            .map(|s| s.image_ref.as_str())
+            .collect();
+        assert!(refs.contains(&"nginx:1.27.0"));
+        assert!(refs.contains(&"redis:7.4.0"));
+    }
+
+    #[test]
+    fn t029_all_succeeded_advances_last_scan_completed_at() {
+        let now = Utc::now();
+        let outcome = AggregatedOutcome::AllSucceeded {
+            scanned: vec![sample_scanned("nginx:1.27.0")],
+        };
+        let out = status_with_aggregated_outcome(scanning_base(), None, &outcome, now);
+        assert_eq!(
+            out.last_scan_completed_at.as_deref(),
+            Some("2026-06-28T14:22:51Z")
+        );
+    }
+
+    #[test]
+    fn t029_all_succeeded_is_append_only_with_existing_entries() {
+        let now = Utc::now();
+        let mut base = scanning_base();
+        base.scanned_images = vec![sample_scanned("old-image:v1")];
+        let outcome = AggregatedOutcome::AllSucceeded {
+            scanned: vec![sample_scanned("new-image:v1")],
+        };
+        let out = status_with_aggregated_outcome(base, None, &outcome, now);
+        assert_eq!(
+            out.scanned_images.len(),
+            2,
+            "existing entries must be preserved (FR-015)"
+        );
+        let refs: Vec<&str> = out
+            .scanned_images
+            .iter()
+            .map(|s| s.image_ref.as_str())
+            .collect();
+        assert!(refs.contains(&"old-image:v1"));
+        assert!(refs.contains(&"new-image:v1"));
+    }
+
+    #[test]
+    fn t010_preserves_last_transition_time_when_reason_unchanged() {
+        let earlier = Utc::now() - ChronoDuration::seconds(60);
+        let later = Utc::now();
+        let outcome = AggregatedOutcome::AllSucceeded {
+            scanned: vec![sample_scanned("nginx:1.27.0")],
+        };
+        let first = status_with_aggregated_outcome(scanning_base(), None, &outcome, earlier);
+        let second = status_with_aggregated_outcome(scanning_base(), Some(&first), &outcome, later);
+        assert_eq!(
+            first.conditions[0].last_transition_time, second.conditions[0].last_transition_time,
+            "lastTransitionTime preserved when (status=True, reason=ScanCompleted) is unchanged",
+        );
+    }
+
+    #[test]
+    fn t010_advances_last_transition_time_when_reason_changes() {
+        let earlier = Utc::now() - ChronoDuration::seconds(60);
+        let later = Utc::now();
+        let first = status_with_aggregated_outcome(
+            scanning_base(),
+            None,
+            &AggregatedOutcome::AnyFailed {
+                image_ref: "broken:v1".to_string(),
+            },
+            earlier,
+        );
+        let second = status_with_aggregated_outcome(
+            scanning_base(),
+            Some(&first),
+            &AggregatedOutcome::AllSucceeded {
+                scanned: vec![sample_scanned("fixed:v1")],
+            },
+            later,
+        );
+        // Transition ScanFailed → ScanCompleted advances time.
+        assert_eq!(
+            second.conditions[0].last_transition_time,
+            Some(later.to_rfc3339()),
         );
     }
 }
