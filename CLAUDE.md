@@ -1,3 +1,3 @@
 <!-- SPECKIT START -->
-Active plan: [specs/007-reconciler-spawns-job/plan.md](specs/007-reconciler-spawns-job/plan.md)
+Active plan: [specs/008-job-status-feedback/plan.md](specs/008-job-status-feedback/plan.md)
 <!-- SPECKIT END -->

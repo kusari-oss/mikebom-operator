@@ -57,13 +57,10 @@ Values the operator writes:
 | `NoImagesInScope`  | `False`  | Target namespaces resolved to zero pods in phase `Running` or `Pending`. Apply workloads to a target namespace, or wait for the next reconcile cycle. | feature 007 |
 | `BuildFailed`      | `False`  | `scan_job::build_scan_job` rejected the CR's `output` block for at least one image (e.g., `output.type=Pvc` without `pvc.claimName`). Message names the failing image. | feature 007 |
 | `RBACInsufficient` | `False`  | The operator's ServiceAccount lacks `pods:list` in a target namespace, or `jobs:create` in its own namespace. Fail-closed across the entire CR per constitution III. | feature 007 |
+| `ScanCompleted`    | `True`   | All owned scan Jobs have `status.succeeded >= 1`. `status.scannedImages[]` is populated with one entry per scanned image; `status.lastScanCompletedAt` advances. With v0.8, `kubectl wait --for=condition=Ready namespacescan/<name>` exits 0 on this transition. | feature 008 |
+| `ScanFailed`       | `False`  | At least one owned scan Job has `status.failed >= backoffLimit + 1` (default 7 failed pods). Failure dominates partial-success: if 1 Job failed and 2 succeeded, the reason is still `ScanFailed`. Message names a failing image so the admin knows where to look. | feature 008 |
 
-Reserved for future features (do not repurpose):
-
-| `reason`            | Introduced in |
-|---------------------|---------------|
-| `ScanCompleted`     | feature 008 (with `status=True`) |
-| `ScanFailed`        | feature 008 |
+No reasons are currently reserved for future features.
 
 ## Output backends
 
