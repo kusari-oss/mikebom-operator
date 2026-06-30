@@ -34,7 +34,7 @@ jobs:
     steps:
       - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4
       - name: Install yq (Go)
-        uses: mikefarah/yq@b534aa9ee5d38001fba3cd8fe254a037e4847b37 # v4.45.1
+        uses: mikefarah/yq@1b9b4ac5187171d2e5e3129be0cfa827c7f9d53d # v4.53.3
         # NOTE: action only installs yq into PATH; we invoke it from the next step.
       - name: Run version-consistency pre-flight
         env:
@@ -74,7 +74,7 @@ jobs:
       # Feature 010 US1: install cosign CLI for sign + attest steps below.
       # SHA pinned per FR-011 / Kusari Inspector. Verify SHA before merge:
       # https://github.com/sigstore/cosign-installer/releases
-      - uses: sigstore/cosign-installer@dc72c7d5c4d10cd6bcd8389b5db18c20b95a4d76 # v3.7.0
+      - uses: sigstore/cosign-installer@7e8b541eb2e61bf99390e1afd4be13a184e9ebc5 # v3.10.1
         if: ${{ !inputs.dry_run }}
       - name: Cosign sign operator image (keyless OIDC, by digest)
         if: ${{ !inputs.dry_run }}
@@ -85,7 +85,7 @@ jobs:
       # SHA pinned per FR-011. Verify SHA before merge:
       # https://github.com/anchore/sbom-action/releases
       - name: Generate CycloneDX SBOM for the operator image
-        uses: anchore/sbom-action@61119d458adab75f756bc0b9e4bde25bc4ffa269 # v0.17.0
+        uses: anchore/sbom-action@e22c389904149dbc22b58101806040fa8d37a610 # v0.24.0
         with:
           image: ghcr.io/kusari-oss/mikebom-operator@${{ steps.build.outputs.digest }}
           format: cyclonedx-json
@@ -120,7 +120,7 @@ jobs:
         if: ${{ !inputs.dry_run }}
         run: helm push mikebom-operator-*.tgz oci://ghcr.io/kusari-oss/charts
       # Feature 010 US2: install cosign CLI for chart signing.
-      - uses: sigstore/cosign-installer@dc72c7d5c4d10cd6bcd8389b5db18c20b95a4d76 # v3.7.0
+      - uses: sigstore/cosign-installer@7e8b541eb2e61bf99390e1afd4be13a184e9ebc5 # v3.10.1
         if: ${{ !inputs.dry_run }}
       - name: Compute chart tag (strip leading 'v' from git tag)
         if: ${{ !inputs.dry_run }}
@@ -155,7 +155,7 @@ jobs:
           echo "value=${TAG#v}" >> "$GITHUB_OUTPUT"
       # SHA pinned per FR-011. Verify SHA before merge:
       # https://github.com/softprops/action-gh-release/releases
-      - uses: softprops/action-gh-release@c062e08bd532815e2076a7d1ba1c3f10677496a13 # v2.0.8
+      - uses: softprops/action-gh-release@3bb12739c298aeb8a4eeaf626c5b8d85266b0e65 # v2.6.2
         with:
           tag_name: ${{ github.ref_name }}
           # Prerelease for tags carrying a hyphenated suffix (e.g., -alpha.N, -rc.N).
