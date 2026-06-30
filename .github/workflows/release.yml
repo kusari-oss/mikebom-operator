@@ -126,27 +126,45 @@ jobs:
     steps:
       - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4
       - uses: azure/setup-helm@1a275c3b69536ee54be43f2070a358922e12c8d4 # v4
+      # cosign reads credentials from the docker config (~/.docker/config.json),
+      # NOT from helm's config. So we log in via docker/login-action first; the
+      # `helm registry login` step below writes credentials for helm's own use.
+      # Both are needed: docker for cosign, helm for `helm push`.
+      - uses: docker/login-action@c94ce9fb468520275223c153574b00df6fe4bcc9 # v3
+        if: ${{ !inputs.dry_run }}
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
       - name: helm registry login
         run: echo "${{ secrets.GITHUB_TOKEN }}" | helm registry login ghcr.io -u ${{ github.actor }} --password-stdin
       - name: helm package
         run: helm package charts/mikebom-operator
-      - name: helm push
+      # Feature 010 US2 (fix in PR #16): capture the chart's manifest digest
+      # from `helm push` output so we can cosign sign by-digest (not by-tag),
+      # mirroring the image-job pattern from T010b. The tag-based approach is
+      # explicitly deprecated by cosign and was emitting a warning before
+      # failing on auth. Pipe to tee so we can grep the digest from stdout.
+      - name: helm push (capture digest)
         if: ${{ !inputs.dry_run }}
-        run: helm push mikebom-operator-*.tgz oci://ghcr.io/kusari-oss/charts
+        id: helm_push
+        run: |
+          helm push mikebom-operator-*.tgz oci://ghcr.io/kusari-oss/charts 2>&1 | tee push.log
+          DIGEST="$(grep -oE 'Digest: sha256:[a-f0-9]+' push.log | head -1 | awk '{print $2}')"
+          if [ -z "$DIGEST" ]; then
+            echo "ERROR: failed to extract chart digest from helm push output" >&2
+            exit 1
+          fi
+          echo "digest=$DIGEST" >> "$GITHUB_OUTPUT"
+          echo "Chart pushed at digest: $DIGEST"
       # Feature 010 US2: install cosign CLI for chart signing.
       - uses: sigstore/cosign-installer@7e8b541eb2e61bf99390e1afd4be13a184e9ebc5 # v3.10.1
         if: ${{ !inputs.dry_run }}
-      - name: Compute chart tag (strip leading 'v' from git tag)
-        if: ${{ !inputs.dry_run }}
-        id: chart_tag
-        run: |
-          TAG="${GITHUB_REF_NAME:-}"
-          echo "value=${TAG#v}" >> "$GITHUB_OUTPUT"
-      - name: Cosign sign chart OCI artifact (keyless OIDC)
+      - name: Cosign sign chart OCI artifact (keyless OIDC, by digest)
         if: ${{ !inputs.dry_run }}
         run: |
           cosign sign --yes \
-            ghcr.io/kusari-oss/charts/mikebom-operator:${{ steps.chart_tag.outputs.value }}
+            ghcr.io/kusari-oss/charts/mikebom-operator@${{ steps.helm_push.outputs.digest }}
 
   # Feature 010 US4: GitHub Release page with artifact links + cosign verify
   # commands. Idempotent for re-runs at the same tag (FR-014 / SC-006) —
