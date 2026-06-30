@@ -144,8 +144,11 @@ jobs:
     runs-on: ubuntu-latest
     if: ${{ !inputs.dry_run }}
     permissions:
+      # softprops/action-gh-release uses GITHUB_TOKEN (not OIDC), so this
+      # job needs only `contents: write` to create the Release page. The
+      # `id-token` permission valid values are `write` and `none`; `read`
+      # is rejected by the workflow parser.
       contents: write
-      id-token: read
     steps:
       - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4
       - name: Compute chart tag (strip leading 'v' from git tag)
