@@ -4,9 +4,13 @@ target/
 .github/
 specs/
 docs/
-e2e/
 charts/
 *.tgz
 .DS_Store
 Dockerfile
 .dockerignore
+# NOTE: `e2e/` is NOT excluded because `Cargo.toml`'s `[workspace] members`
+# lists it; `cargo build` in the Dockerfile builder stage fails to load the
+# workspace manifest if `e2e/Cargo.toml` is absent. The e2e source goes into
+# the builder stage only (the final distroless image just COPYs the compiled
+# binary), so there's no runtime image-size impact.
