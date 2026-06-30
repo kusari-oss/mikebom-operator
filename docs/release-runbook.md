@@ -51,17 +51,20 @@ against any commit on `main` without publishing anything:
 5. **Run workflow**.
 
 In dry-run mode, the workflow:
-- Runs the `versions` pre-flight against `GITHUB_REF_NAME` (which is `main`
-  on a branch dispatch — the check will likely complain about the tag-format
-  mismatch, but the build + SBOM generation steps run regardless).
+- **Skips** the `versions` pre-flight (a workflow_dispatch from a branch like
+  `main` doesn't have a valid `vX.Y.Z` tag — gating the check is the right
+  call). A `::notice::` is emitted explaining why.
 - Builds the multi-arch image but does NOT `docker push`.
-- Generates the CycloneDX SBOM.
-- Installs cosign but does NOT `cosign sign` or `cosign attest` (no
-  signature wasted on a non-published image).
-- Skips `helm push` and the GitHub Release page.
+- Installs cosign but does NOT `cosign sign` or `cosign attest`.
+- **Skips** the SBOM generation step (anchore/sbom-action scans by-digest
+  from a registry, which requires a pushed image).
+- Packages the chart with `helm package` but does NOT `helm push`.
+- Skips the GitHub Release page job entirely.
 
-The dry-run job is the workflow's self-test. If anything is broken (yq
-missing, sbom-action failing, etc.) you find out before tagging.
+The dry-run is the workflow's self-test for *infrastructure* (yq installs,
+docker multi-arch buildx works, helm package succeeds, cosign-installer SHA
+resolves). It does NOT exercise SBOM scanning or signing — those require
+real registry artifacts and are only validated on a real tag push.
 
 ## 3. Tag push
 
