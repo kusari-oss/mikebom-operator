@@ -22,7 +22,7 @@ spec:
           spec:
             properties:
               mikebomImage:
-                description: Pinned mikebom image (e.g., `ghcr.io/kusari-oss/mikebom:v0.1.0-alpha.51`).
+                description: Pinned mikebom image (e.g., `ghcr.io/kusari-oss/mikebom:v0.1.0-alpha.57`).
                 type: string
               output:
                 properties:

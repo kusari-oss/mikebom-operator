@@ -48,7 +48,7 @@ spec:
   target:
     namespaces: [{target_ns}]
   {schedule_yaml}
-  mikebomImage: ghcr.io/kusari-oss/mikebom:v0.1.0-alpha.51
+  mikebomImage: ghcr.io/kusari-oss/mikebom:v0.1.0-alpha.57
   scanFormat: cyclonedx-json
   output:
     type: pvc
