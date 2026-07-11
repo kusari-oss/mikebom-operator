@@ -119,13 +119,13 @@ fi
 # ---------------------------------------------------------------------------
 image_ref="ghcr.io/${MIKEBOM_REPO}"
 
-# DOCKER_CLI_EXPERIMENTAL=enabled forces `manifest inspect` to work on
-# older Docker CLIs where it's still behind the experimental flag. Newer
-# CLIs ignore this env var (safe no-op).
-manifest_json="$(
-  DOCKER_CLI_EXPERIMENTAL=enabled \
-    docker manifest inspect "${image_ref}:${latest_mikebom}" 2>&1
-)" || manifest_exit=$? && manifest_exit=${manifest_exit:-0}
+# `docker manifest inspect` on GH runners can't read ghcr.io public images
+# without a cross-org PAT (GITHUB_TOKEN's `packages: read` only covers this
+# repo's own packages). Use `crane manifest` instead — it handles the
+# ghcr.io token dance for anonymous public reads correctly. See workflow's
+# "Install crane" step for the SHA256-pinned binary.
+manifest_json="$(crane manifest "${image_ref}:${latest_mikebom}" 2>&1)" || manifest_exit=$?
+manifest_exit=${manifest_exit:-0}
 
 soft_noop_manifest() {
   reason="$1"

@@ -29,9 +29,6 @@ permissions:
   contents: write        # Push bump commit to bot branch
   pull-requests: write   # Open PR + enable auto-merge + apply label
   issues: write          # File / comment failure issues (FR-012, FR-016)
-  packages: read         # `docker manifest inspect` on ghcr.io (FR-004) —
-                         #   ghcr.io v2 API rejects anonymous manifest reads
-                         #   even for public images.
 
 concurrency:
   group: nightly-mikebom-bump
@@ -51,15 +48,24 @@ jobs:
       - name: Install yq
         uses: mikefarah/yq@1b9b4ac5187171d2e5e3129be0cfa827c7f9d53d # v4.53.3
 
-      - name: Login to ghcr.io (for docker manifest inspect)
-        # Anonymous reads against ghcr.io's registry v2 API get 401 even for
-        # public images — a well-known ghcr.io quirk. GITHUB_TOKEN with the
-        # workflow's `packages: read` scope authenticates fine.
-        uses: docker/login-action@c94ce9fb468520275223c153574b00df6fe4bcc9 # v3
-        with:
-          registry: ghcr.io
-          username: ${{ github.actor }}
-          password: ${{ secrets.GITHUB_TOKEN }}
+      - name: Install crane (for anonymous ghcr.io manifest reads)
+        # `docker manifest inspect` on GH runners cannot read ghcr.io public
+        # images without a cross-org PAT (`GITHUB_TOKEN` with `packages: read`
+        # only grants access to packages owned by this repo). crane, from
+        # google/go-containerregistry, handles the ghcr.io token dance for
+        # anonymous public reads correctly. SHA256-pinned per Kusari Inspector
+        # rules — the pinned checksum acts as the "action SHA" for a binary
+        # release.
+        run: |
+          set -eu
+          ver=v0.21.7
+          asset=go-containerregistry_Linux_x86_64.tar.gz
+          expected=1a57bc98207fa1c0d04bf760699099e26f8383499bfd55b99c1b919a928a7230
+          url="https://github.com/google/go-containerregistry/releases/download/${ver}/${asset}"
+          curl -sSL -o /tmp/crane.tgz "$url"
+          echo "${expected}  /tmp/crane.tgz" | sha256sum -c -
+          tar -xzf /tmp/crane.tgz -C /usr/local/bin crane
+          crane version
 
       - name: Detect mikebom drift
         id: detect
