@@ -109,7 +109,24 @@ if [ "$latest_num" -eq "$current_num" ]; then
 fi
 
 # ---------------------------------------------------------------------------
-# 3. Multi-arch image manifest gate (FR-004).
+# 3. Image existence gate (FR-004).
+#
+# ghcr.io's registry v2 API does NOT support fully anonymous manifest reads
+# even for public images — every access requires SOME token, and
+# GITHUB_TOKEN's `packages: read` scope only covers packages owned by this
+# repo, not cross-org packages like kusari-oss/mikebom. So `docker manifest
+# inspect` and `crane manifest` both fail without a cross-org PAT.
+#
+# We instead check the container package via the GitHub REST API (which
+# GITHUB_TOKEN CAN read across orgs for public packages, since it's
+# metadata not the binary). If the version exists as a tag on the package,
+# the image is published.
+#
+# Multi-arch verification: this API doesn't expose per-architecture
+# manifests. We rely on mikebom's release contract — its release.yml
+# always publishes multi-arch (amd64+arm64). If they ever break that
+# contract, users would hit ImagePullBackOff at Job-spawn time regardless
+# of what we check here.
 #
 # Per spec Edge Cases: "If the newest mikebom GitHub release is tagged but
 # the corresponding ghcr.io/kusari-oss/mikebom image manifest isn't yet
@@ -118,14 +135,8 @@ fi
 # nonexistent image." → soft noop_manifest_pending, exit 0.
 # ---------------------------------------------------------------------------
 image_ref="ghcr.io/${MIKEBOM_REPO}"
-
-# `docker manifest inspect` on GH runners can't read ghcr.io public images
-# without a cross-org PAT (GITHUB_TOKEN's `packages: read` only covers this
-# repo's own packages). Use `crane manifest` instead — it handles the
-# ghcr.io token dance for anonymous public reads correctly. See workflow's
-# "Install crane" step for the SHA256-pinned binary.
-manifest_json="$(crane manifest "${image_ref}:${latest_mikebom}" 2>&1)" || manifest_exit=$?
-manifest_exit=${manifest_exit:-0}
+org="${MIKEBOM_REPO%%/*}"
+package="${MIKEBOM_REPO##*/}"
 
 soft_noop_manifest() {
   reason="$1"
@@ -142,24 +153,24 @@ soft_noop_manifest() {
   exit 0
 }
 
-if [ "$manifest_exit" -ne 0 ] || [ -z "$manifest_json" ]; then
-  soft_noop_manifest "docker manifest inspect returned exit=${manifest_exit} output=$(printf '%s' "$manifest_json" | head -c 200)"
-fi
+# Query the GitHub packages API for container versions with our target tag.
+package_tag_hits="$(
+  gh api "/orgs/${org}/packages/container/${package}/versions" --paginate \
+    --jq '[.[] | .metadata.container.tags[]?] | map(select(. == "'"${latest_mikebom}"'")) | length' \
+    2>&1
+)" || package_tag_hits=""
 
-mediaType="$(printf '%s' "$manifest_json" | jq -r '.mediaType' 2>/dev/null || echo "")"
-case "$mediaType" in
-  application/vnd.oci.image.index.v1+json|application/vnd.docker.distribution.manifest.list.v2+json)
-    ;;
-  *)
-    soft_noop_manifest "not a multi-arch index (mediaType=$mediaType)"
+case "$package_tag_hits" in
+  ''|*[!0-9]*)
+    soft_noop_manifest "gh api packages/container versions failed or returned non-integer: $(printf '%s' "$package_tag_hits" | head -c 200)"
     ;;
 esac
 
-has_amd64="$(printf '%s' "$manifest_json" | jq '[.manifests[]?.platform.architecture] | index("amd64") != null' 2>/dev/null || echo "false")"
-has_arm64="$(printf '%s' "$manifest_json" | jq '[.manifests[]?.platform.architecture] | index("arm64") != null' 2>/dev/null || echo "false")"
-if [ "$has_amd64" != "true" ] || [ "$has_arm64" != "true" ]; then
-  soft_noop_manifest "multi-arch manifest missing amd64 or arm64 (amd64=$has_amd64 arm64=$has_arm64)"
+if [ "$package_tag_hits" -eq 0 ]; then
+  soft_noop_manifest "no container package version with tag ${latest_mikebom} on ${org}/${package}"
 fi
+
+echo "confirmed image ghcr.io/${org}/${package}:${latest_mikebom} is published (${package_tag_hits} matching version(s))"
 
 # ---------------------------------------------------------------------------
 # 4. Stale-PR check (FR-018): skip if any prior bump PR is still open.

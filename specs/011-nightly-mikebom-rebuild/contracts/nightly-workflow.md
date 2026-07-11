@@ -69,8 +69,12 @@ or is a `uses:` reference to an existing SHA-pinned action.
 - **Runs**: `bash .github/scripts/nightly-detect.sh`
 - **Env**: `MIKEBOM_REPO=kusari-oss/mikebom`, `OPERATOR_REPO=${{
   github.repository }}`, `GH_TOKEN=${{ secrets.GITHUB_TOKEN }}`.
-- **Reads**: `charts/mikebom-operator/values.yaml`, `gh api`, `docker
-  manifest inspect`, `gh pr list`.
+- **Reads**: `charts/mikebom-operator/values.yaml`, `gh api` (both
+  `/repos/kusari-oss/mikebom/releases` for the tag list AND
+  `/orgs/kusari-oss/packages/container/mikebom/versions` for the image-
+  existence check per FR-004; ghcr.io v2 does not support fully
+  anonymous manifest reads so we cannot use `docker manifest inspect`
+  or `crane` here), `gh pr list`.
 - **Writes to `$GITHUB_OUTPUT`**:
   - `decision`: one of `noop_up_to_date`, `noop_open_pr_exists`,
     `noop_known_bad`, `noop_manifest_pending`, `noop_no_operator_baseline`,
