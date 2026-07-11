@@ -249,9 +249,19 @@ gh label create nightly-mikebom-bump/failure \
   --description "Nightly workflow failure — auto-filed with de-dup"
 ```
 
-Then enable **Settings → General → Pull Requests → Allow auto-merge**
-if not already on. Verify the default `GITHUB_TOKEN` can auto-merge
-against `main`'s branch protection; if it can't, escalate per §9.6.
+Then enable **two** repo settings — both required for the nightly to
+successfully open + auto-merge PRs:
+
+- **Settings → General → Pull Requests → Allow auto-merge** (checkbox)
+- **Settings → Actions → General → Workflow permissions → "Allow GitHub
+  Actions to create and approve pull requests"** (checkbox, near the
+  bottom of the page). Off by default — `gh pr create` from a workflow
+  fails with `GraphQL: GitHub Actions is not permitted to create or
+  approve pull requests` without this. Discovered during the first
+  real-run rehearsal — see PR #26.
+
+Verify the default `GITHUB_TOKEN` can auto-merge against `main`'s
+branch protection; if it can't, escalate per §9.6.
 
 ### 9.1 What the nightly does
 
