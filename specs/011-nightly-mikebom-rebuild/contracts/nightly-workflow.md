@@ -69,19 +69,20 @@ or is a `uses:` reference to an existing SHA-pinned action.
 - **Runs**: `bash .github/scripts/nightly-detect.sh`
 - **Env**: `MIKEBOM_REPO=kusari-oss/mikebom`, `OPERATOR_REPO=${{
   github.repository }}`, `GH_TOKEN=${{ secrets.GITHUB_TOKEN }}`.
-- **Reads**: `charts/mikebom-operator/values.yaml`, `gh api` (both
-  `/repos/kusari-oss/mikebom/releases` for the tag list AND
-  `/orgs/kusari-oss/packages/container/mikebom/versions` for the image-
-  existence check per FR-004; ghcr.io v2 does not support fully
-  anonymous manifest reads so we cannot use `docker manifest inspect`
-  or `crane` here), `gh pr list`.
+- **Reads**: `charts/mikebom-operator/values.yaml`,
+  `gh api /repos/kusari-oss/mikebom/releases` for the tag list,
+  `gh pr list` for open + closed bump PRs. Image existence (FR-004) is
+  handled by trusting mikebom's release contract — see hotfix PRs
+  #20/#21/#22/#23 for why explicit ghcr.io manifest verification is
+  infeasible without a cross-org PAT.
 - **Writes to `$GITHUB_OUTPUT`**:
   - `decision`: one of `noop_up_to_date`, `noop_open_pr_exists`,
-    `noop_known_bad`, `noop_manifest_pending`, `noop_no_operator_baseline`,
-    `should_bump`. `noop_manifest_pending` covers the spec edge case where
-    the mikebom release is tagged but the multi-arch image hasn't yet been
-    pushed to ghcr.io — a benign race that resolves itself on the next
-    nightly run.
+    `noop_known_bad`, `noop_no_operator_baseline`, `should_bump`.
+    (Note: `noop_manifest_pending` from an earlier draft was removed
+    when the manifest check was dropped in favor of release-contract
+    trust — see PR #24. If mikebom's release-and-image contract is ever
+    broken, users would hit ImagePullBackOff at Job-spawn regardless of
+    workflow-side checks.)
   - `current_pin`: e.g., `v0.1.0-alpha.57`.
   - `latest_mikebom`: e.g., `v0.1.0-alpha.58`.
   - `next_operator_tag`: e.g., `v0.1.0-alpha.2`.
