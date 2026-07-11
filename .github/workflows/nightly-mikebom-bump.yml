@@ -29,6 +29,9 @@ permissions:
   contents: write        # Push bump commit to bot branch
   pull-requests: write   # Open PR + enable auto-merge + apply label
   issues: write          # File / comment failure issues (FR-012, FR-016)
+  packages: read         # `docker manifest inspect` on ghcr.io (FR-004) —
+                         #   ghcr.io v2 API rejects anonymous manifest reads
+                         #   even for public images.
 
 concurrency:
   group: nightly-mikebom-bump
@@ -47,6 +50,16 @@ jobs:
 
       - name: Install yq
         uses: mikefarah/yq@1b9b4ac5187171d2e5e3129be0cfa827c7f9d53d # v4.53.3
+
+      - name: Login to ghcr.io (for docker manifest inspect)
+        # Anonymous reads against ghcr.io's registry v2 API get 401 even for
+        # public images — a well-known ghcr.io quirk. GITHUB_TOKEN with the
+        # workflow's `packages: read` scope authenticates fine.
+        uses: docker/login-action@c94ce9fb468520275223c153574b00df6fe4bcc9 # v3
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
 
       - name: Detect mikebom drift
         id: detect
