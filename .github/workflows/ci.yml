@@ -43,3 +43,42 @@ jobs:
       - uses: helm/chart-testing-action@4ea74f62c9503ceaffb14a189bf252e7c68e87a3 # v2 (pre-cosign-4.0.0)
       - name: ct lint
         run: ct lint --charts charts/mikebom-operator --validate-maintainers=false
+
+  # Feature 011 T014: shellcheck the nightly bump scripts.
+  shellcheck:
+    name: shellcheck nightly scripts
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4
+      - name: shellcheck
+        run: |
+          # shellcheck is preinstalled on ubuntu-latest.
+          shellcheck -s sh \
+            .github/scripts/check-versions.sh \
+            .github/scripts/nightly-detect.sh \
+            .github/scripts/nightly-bump.sh \
+            .github/scripts/nightly-open-pr.sh \
+            .github/scripts/nightly-tag.sh
+
+  # Feature 011 T013: SHA-pin discipline check for the nightly workflows.
+  # Every `uses:` in the two new workflows MUST reference a 40-char SHA
+  # (plan.md: "zero new SHAs"). Also enforced retroactively across the
+  # existing workflows.
+  pinned-actions:
+    name: verify SHA pins in nightly workflows
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4
+      - name: fail on unpinned uses
+        run: |
+          set -eu
+          unpinned="$(grep -rn "uses: " \
+            .github/workflows/nightly-mikebom-bump.yml \
+            .github/workflows/tag-on-nightly-merge.yml \
+            | grep -vE 'uses: [^ ]+@[0-9a-f]{40}' || true)"
+          if [ -n "$unpinned" ]; then
+            echo "::error::unpinned action reference(s) found:"
+            printf '%s\n' "$unpinned"
+            exit 1
+          fi
+          echo "all nightly workflow actions are SHA-pinned"

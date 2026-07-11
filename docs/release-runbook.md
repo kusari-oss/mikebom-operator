@@ -1,7 +1,7 @@
 # mikebom-operator release runbook
 
 The end-to-end checklist for cutting a tagged release. Last updated for
-feature 010 (v0.1.0-alpha.1 pipeline).
+feature 011 (nightly mikebom rebuild — appended as §9).
 
 ## 0. Prerequisites (one-time)
 
@@ -216,3 +216,132 @@ If any step from §4 fails, or if a release needs to be retracted:
 - **No automated changelog generation**: the Release body is a static
   template populated with tag-specific links. Manual notes go in a PR
   description, not the Release page.
+
+## 9. Nightly rebuild workflow (feature 011)
+
+At 03:17 UTC every day, `.github/workflows/nightly-mikebom-bump.yml`
+inspects mikebom's release surface and, if a newer alpha is available,
+opens a PR that bumps the operator's mikebom pin + regenerates the CRD
++ bumps the operator's own version in structural lockstep. The PR
+auto-merges on green CI + Kusari Inspector, and
+`.github/workflows/tag-on-nightly-merge.yml` pushes the resulting
+operator tag — which fires `release.yml` (this runbook's §§1-4)
+unchanged.
+
+### 9.0 First-time setup
+
+Run once, then never again:
+
+```sh
+gh label create nightly-mikebom-bump \
+  --repo kusari-oss/mikebom-operator \
+  --color 0e8a16 \
+  --description "Auto-opened by nightly-mikebom-bump.yml"
+
+gh label create nightly-mikebom-bump/cleared \
+  --repo kusari-oss/mikebom-operator \
+  --color ffd700 \
+  --description "Maintainer override — excludes closed PR from known-bad set"
+
+gh label create nightly-mikebom-bump/failure \
+  --repo kusari-oss/mikebom-operator \
+  --color d93f0b \
+  --description "Nightly workflow failure — auto-filed with de-dup"
+```
+
+Then enable **Settings → General → Pull Requests → Allow auto-merge**
+if not already on. Verify the default `GITHUB_TOKEN` can auto-merge
+against `main`'s branch protection; if it can't, escalate per §9.6.
+
+### 9.1 What the nightly does
+
+Reads the current mikebom pin from
+`charts/mikebom-operator/values.yaml`. Queries the highest
+`v0.1.0-alpha.*` release on `kusari-oss/mikebom`. Verifies the
+multi-arch image manifest exists on ghcr.io. Checks that no prior
+bump PR is still open (FR-018) and that the target alpha isn't in
+the derived known-bad set (FR-017). If all checks pass and the target
+is strictly newer, bumps every live reference in the repo (12 files
+— same set the manual `v0.1.0-alpha.57` bump touched), regenerates
+the CRD via `mikebom-operator-ctl`, bumps the operator's own version
+in structural lockstep across `Cargo.toml` + `Chart.yaml`, opens a
+labeled PR, and enables `gh pr merge --auto --squash`. On merge,
+`tag-on-nightly-merge.yml` detects the commit's `Nightly-Bump-Target:`
+trailer and pushes the corresponding operator tag.
+
+### 9.2 Dry-run rehearsal
+
+Before enabling the schedule for the first time (or after any change
+to the scripts), rehearse against production repo state without
+touching origin:
+
+```sh
+gh workflow run nightly-mikebom-bump.yml -f dry_run=true
+gh run watch
+```
+
+Expected: `::notice::current_pin=…` + `[dry_run] Would push branch …`
+notices, zero commits/branches on origin, zero PRs opened.
+
+### 9.3 First real-run inspection checklist
+
+After the first non-dry run opens a PR:
+
+- [ ] PR title matches `chore(nightly): bump mikebom to v0.1.0-alpha.<M> and operator to v0.1.0-alpha.<N>`
+- [ ] PR body has ✅ verification checkmarks + mikebom release-notes excerpt
+- [ ] PR label is `nightly-mikebom-bump`
+- [ ] PR branch is `automation/nightly-bump/<mikebom_tag>`
+- [ ] HEAD commit message contains `Nightly-Bump-Target: <mikebom_tag>`
+- [ ] Diff touches ONLY the 12-file live surface + `Cargo.toml` +
+  `Chart.yaml` + regenerated CRD (does NOT touch `specs/003-*` or
+  `specs/004-*`)
+- [ ] CI + Kusari Inspector run and pass
+- [ ] After auto-merge, `tag-on-nightly-merge.yml` fires and pushes
+  the tag
+- [ ] `release.yml` produces signed artifacts identical in shape to
+  §4 above; run §4's cosign-verify commands against the new tag
+
+### 9.4 Common operational actions
+
+**Hold the nightly** — Actions tab → nightly-mikebom-bump → "…" →
+Disable workflow. Re-enable when ready. Workflow is stateless.
+
+**Clear a known-bad marker** — either reopen the closed unmerged PR
+(`gh pr reopen <n>`) or label it cleared:
+
+```sh
+gh pr edit <n> --add-label nightly-mikebom-bump/cleared
+```
+
+**Force a bump on-demand** — `gh workflow run nightly-mikebom-bump.yml`
+(uses `dry_run=false` by default).
+
+**Cancel a bump PR mid-flight** — `gh pr close <n>` closes without
+merging. The next nightly treats that mikebom target as known-bad; if
+that's not desired, also apply the `/cleared` label above.
+
+**Roll back a bad release** — out of scope for the nightly. Use §6
+above.
+
+### 9.5 Trust boundaries
+
+- Nightly can push commits to bot branches, open PRs, apply labels,
+  file/comment issues, enable auto-merge (via `GITHUB_TOKEN`).
+- Nightly CANNOT push directly to `main` (branch protection).
+- Tag workflow can push tags. It CANNOT overwrite existing tags
+  (idempotency check).
+- Neither workflow signs anything. Signing remains cosign-keyless-OIDC
+  via `release.yml` on tag push (feature 010).
+- Neither workflow can bypass Kusari Inspector or CI. Auto-merge fires
+  only when both are green.
+
+### 9.6 Troubleshooting
+
+| Symptom | Likely cause | Fix |
+|--------|-------------|-----|
+| No PR opened despite mikebom moving | Prior unresolved PR (FR-018) | `gh pr list --label nightly-mikebom-bump --state open` — resolve it |
+| PR opened but auto-merge didn't enable | `GITHUB_TOKEN` can't auto-merge on protected branch | Repo Settings → General → Allow auto-merge. Consider a GitHub App if it still fails |
+| Auto-merge fires but tag never pushed | `Nightly-Bump-Target:` trailer missing from merged commit | Verify auto-merge strategy is `--squash` (trailer survives squash; merge commits shift HEAD) |
+| Duplicate failure issues piling up | De-dup search failing | Inspect `gh issue list --label nightly-mikebom-bump/failure`; broaden the `--search` term in the workflow |
+| Nightly no-ops when mikebom clearly moved | Known-bad set incorrectly matching | Manually run detection: `bash .github/scripts/nightly-detect.sh 2>&1` — inspect derived known-bad list |
+| Tag workflow fires on non-bump merges | Trailer accidentally present in a manual commit | Idempotency check in T006's script prevents damage; still audit the commit |

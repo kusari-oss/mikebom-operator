@@ -1,0 +1,60 @@
+# Feature 011 T008: post-merge tag-push workflow.
+#
+# Fires on every push to main. Inspects the HEAD commit for a
+# `Nightly-Bump-Target:` trailer; if present, reads Chart.yaml's
+# appVersion, checks tag idempotency, and pushes the corresponding
+# operator tag. The tag push triggers release.yml (unchanged from
+# feature 010).
+#
+# Safe to run on every push — non-nightly commits short-circuit at the
+# trailer-detection step with zero cost.
+#
+# See specs/011-nightly-mikebom-rebuild/contracts/tag-workflow.md for
+# the machine-checkable contract.
+
+name: Tag on nightly merge
+
+on:
+  push:
+    branches: [main]
+
+permissions:
+  contents: write   # Push tag
+
+concurrency:
+  group: tag-on-nightly-merge
+  cancel-in-progress: false
+
+jobs:
+  tag:
+    name: Detect nightly bump + push tag
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4
+        with:
+          fetch-depth: 0
+          fetch-tags: true
+          token: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Detect Nightly-Bump-Target trailer on HEAD
+        id: detect
+        run: |
+          set -eu
+          trailer="$(git log -1 --format=%B | grep -m1 '^Nightly-Bump-Target:' || true)"
+          if [ -z "$trailer" ]; then
+            echo "not-a-nightly-bump=true" >>"$GITHUB_OUTPUT"
+            echo "::notice::HEAD is not a nightly bump commit; nothing to tag"
+            exit 0
+          fi
+          target="$(printf '%s\n' "$trailer" | sed -E 's/^Nightly-Bump-Target:[[:space:]]*//')"
+          echo "mikebom-target=$target" >>"$GITHUB_OUTPUT"
+          echo "::notice::Detected nightly bump for mikebom target: $target"
+
+      - name: Install yq
+        if: steps.detect.outputs.not-a-nightly-bump != 'true'
+        uses: mikefarah/yq@1b9b4ac5187171d2e5e3129be0cfa827c7f9d53d # v4.53.3
+
+      - name: Push tag
+        if: steps.detect.outputs.not-a-nightly-bump != 'true'
+        run: bash .github/scripts/nightly-tag.sh

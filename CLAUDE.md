@@ -1,3 +1,5 @@
 <!-- SPECKIT START -->
-Active plan: [specs/010-release-pipeline/plan.md](specs/010-release-pipeline/plan.md)
+For additional context about technologies to be used, project structure,
+shell commands, and other important information, read the current plan
+at specs/011-nightly-mikebom-rebuild/plan.md
 <!-- SPECKIT END -->
