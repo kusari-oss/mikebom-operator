@@ -1,0 +1,165 @@
+# Feature 011 T007: nightly mikebom bump workflow.
+#
+# Detects whether mikebom has published a newer alpha than the operator's
+# current pin, bumps the 12-file live surface + regenerated CRD + operator
+# version, runs a local fmt/build/unit-test gate, opens a labeled PR, and
+# enables GitHub-native auto-merge. On failure, files (or comments on) a
+# GitHub issue with the failure signature (see signal_failure step below).
+#
+# See specs/011-nightly-mikebom-rebuild/contracts/nightly-workflow.md for
+# the machine-checkable contract.
+
+name: Nightly mikebom bump
+
+on:
+  schedule:
+    # 03:17 UTC daily. Off-hour to avoid collision with typical Kusari
+    # release windows (see plan.md Technical Context / Performance Goals).
+    - cron: "17 3 * * *"
+  workflow_dispatch:
+    inputs:
+      dry_run:
+        description: "Detect + bump locally on the runner but do NOT push or open PR"
+        required: false
+        type: boolean
+        default: false
+
+# Workflow-level default: least-privilege. Individual writes opt in below.
+permissions:
+  contents: write        # Push bump commit to bot branch
+  pull-requests: write   # Open PR + enable auto-merge + apply label
+  issues: write          # File / comment failure issues (FR-012, FR-016)
+
+concurrency:
+  group: nightly-mikebom-bump
+  cancel-in-progress: false
+
+jobs:
+  bump:
+    name: Detect + bump + open PR
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4
+        with:
+          fetch-depth: 0
+          token: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Install yq
+        uses: mikefarah/yq@1b9b4ac5187171d2e5e3129be0cfa827c7f9d53d # v4.53.3
+
+      - name: Detect mikebom drift
+        id: detect
+        env:
+          MIKEBOM_REPO: kusari-oss/mikebom
+          OPERATOR_REPO: ${{ github.repository }}
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: bash .github/scripts/nightly-detect.sh
+
+      - name: Bump files, regen CRD, bump version
+        id: bump
+        if: steps.detect.outputs.decision == 'should_bump'
+        env:
+          MIKEBOM_OLD: ${{ steps.detect.outputs.current_pin }}
+          MIKEBOM_NEW: ${{ steps.detect.outputs.latest_mikebom }}
+          OPERATOR_NEW: ${{ steps.detect.outputs.next_operator_tag }}
+        run: bash .github/scripts/nightly-bump.sh
+
+      - name: "Dry-run: preview only"
+        if: steps.detect.outputs.decision == 'should_bump' && inputs.dry_run
+        env:
+          MIKEBOM_NEW: ${{ steps.detect.outputs.latest_mikebom }}
+          OPERATOR_NEW: ${{ steps.detect.outputs.next_operator_tag }}
+        run: |
+          echo "::notice::[dry_run] Would push branch automation/nightly-bump/${MIKEBOM_NEW}"
+          echo "::notice::[dry_run] Would open PR titled: chore(nightly): bump mikebom to ${MIKEBOM_NEW} and operator to ${OPERATOR_NEW}"
+          echo "::notice::[dry_run] Would enable auto-merge --squash"
+          git status --porcelain
+
+      - name: Open PR + enable auto-merge
+        id: open_pr
+        if: steps.detect.outputs.decision == 'should_bump' && !inputs.dry_run
+        env:
+          MIKEBOM_NEW: ${{ steps.detect.outputs.latest_mikebom }}
+          OPERATOR_NEW: ${{ steps.detect.outputs.next_operator_tag }}
+          CURRENT_PIN: ${{ steps.detect.outputs.current_pin }}
+          MIKEBOM_REPO: kusari-oss/mikebom
+          PR_LABEL: nightly-mikebom-bump
+          RUN_URL: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: bash .github/scripts/nightly-open-pr.sh
+
+      # Feature 011 T009 (US2): failure signal — issue + annotation with de-dup.
+      - name: Signal failure
+        if: failure()
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          RUN_URL: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}
+        run: |
+          set -eu
+          # Coarse error class buckets — used in the failure signature for de-dup.
+          # We infer the failing step by walking backwards: the last non-null
+          # step conclusion is the culprit. GitHub Actions makes this available
+          # via $GITHUB_JOB but not per-step here, so we use a heuristic based
+          # on which outputs are/aren't set.
+          if [ -z "${DETECT_OK:-}" ] && [ -z "$(git status --porcelain 2>/dev/null || true)" ]; then
+            step_name="detect"
+            error_class="network"
+          elif [ -n "$(git status --porcelain 2>/dev/null || true)" ]; then
+            step_name="bump"
+            error_class="test"
+          else
+            step_name="open_pr"
+            error_class="push"
+          fi
+
+          if test -z "$(git status --porcelain 2>/dev/null || true)"; then
+            repo_state=clean
+          else
+            repo_state=partially-modified
+          fi
+
+          issue_title="[nightly] failed at ${step_name}"
+
+          # De-dup (FR-016): search for an existing open issue with the same
+          # step_name in its title.
+          existing="$(
+            gh issue list \
+              --state open \
+              --label nightly-mikebom-bump/failure \
+              --search "in:title \"failed at ${step_name}\"" \
+              --json number --jq '.[0].number // empty' \
+              2>/dev/null || true
+          )"
+
+          body_file="$(mktemp -t nightly-issue-body.XXXXXX)"
+          cat >"$body_file" <<EOF
+          ## Nightly run failed
+
+          - **Step**: \`${step_name}\`
+          - **Error class**: \`${error_class}\`
+          - **Repo state**: \`${repo_state}\`
+          - **Run**: ${RUN_URL}
+
+          Filed by the \`signal_failure\` step in \`nightly-mikebom-bump.yml\`. De-dup on \`(step, error_class)\`.
+
+          When resolved, close this issue. The next successful nightly run will not re-file.
+          EOF
+
+          if [ -n "$existing" ]; then
+            gh issue comment "$existing" --body-file "$body_file" 2>&1 || \
+              echo "::warning::failed to comment on existing failure issue #$existing (swallowed)"
+            issue_url="${{ github.server_url }}/${{ github.repository }}/issues/${existing}"
+          else
+            issue_url="$(gh issue create \
+              --title "$issue_title" \
+              --body-file "$body_file" \
+              --label nightly-mikebom-bump/failure \
+              2>&1 || echo "")"
+            if [ -z "$issue_url" ]; then
+              echo "::warning::failed to create failure issue (falling back to annotation only)"
+            fi
+          fi
+
+          echo "::error file=.github/workflows/nightly-mikebom-bump.yml::Nightly failed at ${step_name}. Issue: ${issue_url:-<none>}"
+          rm -f "$body_file"
