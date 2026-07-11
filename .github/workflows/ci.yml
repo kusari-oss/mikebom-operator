@@ -52,8 +52,10 @@ jobs:
       - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4
       - name: shellcheck
         run: |
-          # shellcheck is preinstalled on ubuntu-latest.
-          shellcheck -s sh \
+          # shellcheck is preinstalled on ubuntu-latest. Each script's
+          # shebang selects the dialect (bash for check-versions.sh, sh
+          # for the nightly-*.sh set), so we do NOT force `-s sh`.
+          shellcheck \
             .github/scripts/check-versions.sh \
             .github/scripts/nightly-detect.sh \
             .github/scripts/nightly-bump.sh \
