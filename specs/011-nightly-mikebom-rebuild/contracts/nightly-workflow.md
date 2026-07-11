@@ -73,7 +73,11 @@ or is a `uses:` reference to an existing SHA-pinned action.
   manifest inspect`, `gh pr list`.
 - **Writes to `$GITHUB_OUTPUT`**:
   - `decision`: one of `noop_up_to_date`, `noop_open_pr_exists`,
-    `noop_known_bad`, `noop_no_operator_baseline`, `should_bump`.
+    `noop_known_bad`, `noop_manifest_pending`, `noop_no_operator_baseline`,
+    `should_bump`. `noop_manifest_pending` covers the spec edge case where
+    the mikebom release is tagged but the multi-arch image hasn't yet been
+    pushed to ghcr.io — a benign race that resolves itself on the next
+    nightly run.
   - `current_pin`: e.g., `v0.1.0-alpha.57`.
   - `latest_mikebom`: e.g., `v0.1.0-alpha.58`.
   - `next_operator_tag`: e.g., `v0.1.0-alpha.2`.
