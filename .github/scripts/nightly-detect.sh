@@ -110,30 +110,55 @@ fi
 
 # ---------------------------------------------------------------------------
 # 3. Multi-arch image manifest gate (FR-004).
+#
+# Per spec Edge Cases: "If the newest mikebom GitHub release is tagged but
+# the corresponding ghcr.io/kusari-oss/mikebom image manifest isn't yet
+# published (race between GitHub release and image push), the nightly MUST
+# detect this and defer to the next run rather than release against a
+# nonexistent image." → soft noop_manifest_pending, exit 0.
 # ---------------------------------------------------------------------------
 image_ref="ghcr.io/${MIKEBOM_REPO}"
 
-manifest_json="$(docker manifest inspect "${image_ref}:${latest_mikebom}" 2>/dev/null || true)"
-if [ -z "$manifest_json" ]; then
-  echo "::error::docker manifest inspect ${image_ref}:${latest_mikebom} failed" >&2
-  exit 1
+# DOCKER_CLI_EXPERIMENTAL=enabled forces `manifest inspect` to work on
+# older Docker CLIs where it's still behind the experimental flag. Newer
+# CLIs ignore this env var (safe no-op).
+manifest_json="$(
+  DOCKER_CLI_EXPERIMENTAL=enabled \
+    docker manifest inspect "${image_ref}:${latest_mikebom}" 2>&1
+)" || manifest_exit=$? && manifest_exit=${manifest_exit:-0}
+
+soft_noop_manifest() {
+  reason="$1"
+  echo "::warning::${image_ref}:${latest_mikebom}: ${reason} — deferring to next nightly run per spec edge case"
+  emit decision noop_manifest_pending
+  emit current_pin "$current_pin"
+  emit latest_mikebom "$latest_mikebom"
+  emit next_operator_tag ""
+  emit open_pr_number ""
+  summary "| Decision | noop_manifest_pending |"
+  summary "| Current pin | $current_pin |"
+  summary "| Latest mikebom | $latest_mikebom |"
+  summary "| Reason | $reason |"
+  exit 0
+}
+
+if [ "$manifest_exit" -ne 0 ] || [ -z "$manifest_json" ]; then
+  soft_noop_manifest "docker manifest inspect returned exit=${manifest_exit} output=$(printf '%s' "$manifest_json" | head -c 200)"
 fi
 
-mediaType="$(printf '%s' "$manifest_json" | jq -r '.mediaType')"
+mediaType="$(printf '%s' "$manifest_json" | jq -r '.mediaType' 2>/dev/null || echo "")"
 case "$mediaType" in
   application/vnd.oci.image.index.v1+json|application/vnd.docker.distribution.manifest.list.v2+json)
     ;;
   *)
-    echo "::error::${image_ref}:${latest_mikebom} is not a multi-arch index (mediaType=$mediaType)" >&2
-    exit 1
+    soft_noop_manifest "not a multi-arch index (mediaType=$mediaType)"
     ;;
 esac
 
-has_amd64="$(printf '%s' "$manifest_json" | jq '[.manifests[]?.platform.architecture] | index("amd64") != null')"
-has_arm64="$(printf '%s' "$manifest_json" | jq '[.manifests[]?.platform.architecture] | index("arm64") != null')"
+has_amd64="$(printf '%s' "$manifest_json" | jq '[.manifests[]?.platform.architecture] | index("amd64") != null' 2>/dev/null || echo "false")"
+has_arm64="$(printf '%s' "$manifest_json" | jq '[.manifests[]?.platform.architecture] | index("arm64") != null' 2>/dev/null || echo "false")"
 if [ "$has_amd64" != "true" ] || [ "$has_arm64" != "true" ]; then
-  echo "::error::${image_ref}:${latest_mikebom} manifest missing amd64 or arm64 (amd64=$has_amd64 arm64=$has_arm64)" >&2
-  exit 1
+  soft_noop_manifest "multi-arch manifest missing amd64 or arm64 (amd64=$has_amd64 arm64=$has_arm64)"
 fi
 
 # ---------------------------------------------------------------------------
