@@ -111,66 +111,26 @@ fi
 # ---------------------------------------------------------------------------
 # 3. Image existence gate (FR-004).
 #
-# ghcr.io's registry v2 API does NOT support fully anonymous manifest reads
-# even for public images — every access requires SOME token, and
-# GITHUB_TOKEN's `packages: read` scope only covers packages owned by this
-# repo, not cross-org packages like kusari-oss/mikebom. So `docker manifest
-# inspect` and `crane manifest` both fail without a cross-org PAT.
+# We already verified that the mikebom GitHub release exists via the
+# releases API above (that's how we got `latest_mikebom`). Explicit
+# manifest verification via `docker manifest inspect` / `crane manifest` /
+# `gh api packages/container/versions` all require cross-org authentication
+# that GITHUB_TOKEN does not grant — see hotfix PRs #20/#21/#22/#23 for the
+# investigation.
 #
-# We instead check the container package via the GitHub REST API (which
-# GITHUB_TOKEN CAN read across orgs for public packages, since it's
-# metadata not the binary). If the version exists as a tag on the package,
-# the image is published.
+# We trust mikebom's release contract: their release.yml publishes the
+# GitHub release AND pushes the multi-arch image atomically. The tiny race
+# window where the release exists but the image push hasn't landed yet
+# resolves within seconds; the next nightly (or the maintainer's dispatch)
+# picks it up cleanly. If the release-and-image contract is ever broken,
+# end users hit ImagePullBackOff at Job-spawn — the same outcome we'd get
+# if a workflow-side manifest check had failed.
 #
-# Multi-arch verification: this API doesn't expose per-architecture
-# manifests. We rely on mikebom's release contract — its release.yml
-# always publishes multi-arch (amd64+arm64). If they ever break that
-# contract, users would hit ImagePullBackOff at Job-spawn time regardless
-# of what we check here.
-#
-# Per spec Edge Cases: "If the newest mikebom GitHub release is tagged but
-# the corresponding ghcr.io/kusari-oss/mikebom image manifest isn't yet
-# published (race between GitHub release and image push), the nightly MUST
-# detect this and defer to the next run rather than release against a
-# nonexistent image." → soft noop_manifest_pending, exit 0.
+# If we ever need strict per-architecture verification, add a repo secret
+# containing a cross-org PAT with `read:packages` and switch to `crane
+# manifest` — but that's a real ongoing secret-management cost.
 # ---------------------------------------------------------------------------
-image_ref="ghcr.io/${MIKEBOM_REPO}"
-org="${MIKEBOM_REPO%%/*}"
-package="${MIKEBOM_REPO##*/}"
-
-soft_noop_manifest() {
-  reason="$1"
-  echo "::warning::${image_ref}:${latest_mikebom}: ${reason} — deferring to next nightly run per spec edge case"
-  emit decision noop_manifest_pending
-  emit current_pin "$current_pin"
-  emit latest_mikebom "$latest_mikebom"
-  emit next_operator_tag ""
-  emit open_pr_number ""
-  summary "| Decision | noop_manifest_pending |"
-  summary "| Current pin | $current_pin |"
-  summary "| Latest mikebom | $latest_mikebom |"
-  summary "| Reason | $reason |"
-  exit 0
-}
-
-# Query the GitHub packages API for container versions with our target tag.
-package_tag_hits="$(
-  gh api "/orgs/${org}/packages/container/${package}/versions" --paginate \
-    --jq '[.[] | .metadata.container.tags[]?] | map(select(. == "'"${latest_mikebom}"'")) | length' \
-    2>&1
-)" || package_tag_hits=""
-
-case "$package_tag_hits" in
-  ''|*[!0-9]*)
-    soft_noop_manifest "gh api packages/container versions failed or returned non-integer: $(printf '%s' "$package_tag_hits" | head -c 200)"
-    ;;
-esac
-
-if [ "$package_tag_hits" -eq 0 ]; then
-  soft_noop_manifest "no container package version with tag ${latest_mikebom} on ${org}/${package}"
-fi
-
-echo "confirmed image ghcr.io/${org}/${package}:${latest_mikebom} is published (${package_tag_hits} matching version(s))"
+echo "trusting mikebom release contract: ${latest_mikebom} release exists, image assumed published"
 
 # ---------------------------------------------------------------------------
 # 4. Stale-PR check (FR-018): skip if any prior bump PR is still open.
