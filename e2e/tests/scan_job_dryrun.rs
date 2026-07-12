@@ -31,7 +31,7 @@ fn valid_spec(format: ScanFormat) -> NamespaceScanSpec {
             cron: Some("0 */6 * * *".to_string()),
             interval: None,
         },
-        mikebom_image: "ghcr.io/kusari-oss/mikebom:v0.1.0-alpha.57".to_string(),
+        mikebom_image: "ghcr.io/kusari-oss/mikebom:v0.1.0-alpha.58".to_string(),
         scan_format: format,
         output: Output {
             backend_type: OutputType::Pvc,
