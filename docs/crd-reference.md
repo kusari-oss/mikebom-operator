@@ -153,7 +153,7 @@ spec:
     namespaces: [prod]
   schedule:
     cron: "0 */6 * * *"
-  mikebomImage: ghcr.io/kusari-oss/mikebom:v0.1.0-alpha.57
+  mikebomImage: ghcr.io/kusari-oss/mikebom:v0.1.0-alpha.60
   scanFormat: cyclonedx-json
   output:
     type: pvc
@@ -207,7 +207,7 @@ spec:
     namespaces: [prod]
   schedule:
     cron: "0 */6 * * *"
-  mikebomImage: ghcr.io/kusari-oss/mikebom:v0.1.0-alpha.57
+  mikebomImage: ghcr.io/kusari-oss/mikebom:v0.1.0-alpha.60
   scanFormat: cyclonedx-json
   output:
     type: s3
@@ -251,7 +251,7 @@ spec:
     namespaces: [prod]
   schedule:
     cron: "0 */6 * * *"
-  mikebomImage: ghcr.io/kusari-oss/mikebom:v0.1.0-alpha.57
+  mikebomImage: ghcr.io/kusari-oss/mikebom:v0.1.0-alpha.60
   scanFormat: cyclonedx-json
   output:
     type: oci

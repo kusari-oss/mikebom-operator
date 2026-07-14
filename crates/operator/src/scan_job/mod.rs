@@ -622,7 +622,7 @@ mod tests {
                 cron: Some("0 */6 * * *".to_string()),
                 interval: None,
             },
-            mikebom_image: "ghcr.io/kusari-oss/mikebom:v0.1.0-alpha.57".to_string(),
+            mikebom_image: "ghcr.io/kusari-oss/mikebom:v0.1.0-alpha.60".to_string(),
             scan_format: ScanFormat::CyclonedxJson,
             // Feature 006: all 3 backends are now real; there is no placeholder
             // branch left. Populate a valid OCI config so inherited tests that
@@ -779,7 +779,7 @@ mod tests {
         let scan = &pod_spec(&job).init_containers.as_ref().unwrap()[1];
         assert_eq!(
             scan.image.as_deref(),
-            Some("ghcr.io/kusari-oss/mikebom:v0.1.0-alpha.57"),
+            Some("ghcr.io/kusari-oss/mikebom:v0.1.0-alpha.60"),
         );
         let args = scan.args.as_ref().unwrap();
         assert_eq!(&args[0..4], &["sbom", "scan", "--path", "/workdir/rootfs"]);
