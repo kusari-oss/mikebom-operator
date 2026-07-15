@@ -20,7 +20,7 @@ use serde::{Deserialize, Serialize};
 pub struct NamespaceScanSpec {
     pub target: Target,
     pub schedule: Schedule,
-    /// Pinned mikebom image (e.g., `ghcr.io/kusari-oss/mikebom:v0.1.0-alpha.57`).
+    /// Pinned mikebom image (e.g., `ghcr.io/kusari-oss/mikebom:v0.1.0-alpha.62`).
     pub mikebom_image: String,
     pub scan_format: ScanFormat,
     pub output: Output,
