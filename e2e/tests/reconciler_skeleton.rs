@@ -228,7 +228,7 @@ spec:
     kinds: [Pod]
   schedule:
     cron: "0 */6 * * *"
-  mikebomImage: ghcr.io/kusari-oss/mikebom:v0.1.0-alpha.57
+  mikebomImage: ghcr.io/kusari-oss/mikebom:v0.1.0-alpha.64
   scanFormat: cyclonedx-json
   output:
     type: pvc
@@ -250,7 +250,7 @@ spec:
     kinds: [Pod]
   schedule:
     cron: "0 */6 * * *"
-  mikebomImage: ghcr.io/kusari-oss/mikebom:v0.1.0-alpha.57
+  mikebomImage: ghcr.io/kusari-oss/mikebom:v0.1.0-alpha.64
   scanFormat: cyclonedx-json
   output:
     type: pvc
